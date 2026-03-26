@@ -13,9 +13,15 @@ import optax
 import wandb
 from flax.core import FrozenDict
 from flax.training import orbax_utils, train_state
-from hydra.utils import instantiate
 from jax import jit, random
-from omegaconf import DictConfig, OmegaConf
+
+try:
+    from hydra.utils import instantiate
+    from omegaconf import DictConfig, OmegaConf
+except ImportError:
+    instantiate = None  # type: ignore[assignment]
+    DictConfig = dict  # type: ignore[assignment, misc]
+    OmegaConf = None  # type: ignore[assignment]
 from orbax.checkpoint import PyTreeCheckpointer
 from tqdm import tqdm
 
