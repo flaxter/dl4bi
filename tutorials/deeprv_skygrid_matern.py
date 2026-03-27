@@ -15,7 +15,7 @@ Usage
     python deeprv_skygrid_matern.py --skip-training --skip-mcmc
 
 # Longer MCMC with more chains:
-    python deeprv_skygrid_matern.py --skip-training --num-chains 4 --num-samples 4000 --num-warmup 2000
+    python deeprv_skygrid_matern.py --skip-training --num-chains 4 --num-samples 400 --num-warmup 400
 """
 
 import argparse
@@ -63,8 +63,8 @@ times_flat = grid_times[:, 0]                                    # (M,)
 s          = grid_times
 
 # GP hyperparameter priors (shared by training dataloader and MCMC model)
-LOG_SIGMA2_MEAN = 0.0;  LOG_SIGMA2_STD = 1.0   # sigma2 95% CI ~ [0.14, 7.4]
-LOG_ELL_MEAN    = float(jnp.log(CUTOFF / 4));  LOG_ELL_STD = 0.5   # ell 95% CI ~ [37, 270] yr
+LOG_SIGMA2_MEAN = 2.71;  LOG_SIGMA2_STD = 0.5   # sigma2 95% CI ~ [5.5, 40], mode ~15
+LOG_ELL_MEAN    = float(jnp.log(CUTOFF / 4));  LOG_ELL_STD = 0.3   # ell 95% CI ~ [55, 182] yr
 
 
 # ── Matérn 3/2 kernel ─────────────────────────────────────────────────────────
@@ -222,7 +222,7 @@ def phase_mcmc(args, surrogate_decoder):
         num_warmup=args.num_warmup,
         num_samples=args.num_samples,
         num_chains=args.num_chains,
-        chain_method="vectorized",   # runs all chains in parallel via vmap on GPU
+        chain_method="vectorized" if jax.default_backend() == "gpu" else "parallel",
         progress_bar=True,
     )
 
@@ -286,6 +286,48 @@ def phase_plot(mcmc_gmrf, mcmc_drv, out_path="hcv_egypt_ne.png"):
     plt.savefig(out_path, dpi=150)
     print(f"  Plot saved → {out_path}")
     plt.show()
+
+    # ── GP hyperparameter posteriors ─────────────────────────────────────────
+    drv_samples = mcmc_drv.get_samples()
+    if "log_sigma2" in drv_samples and "log_ell" in drv_samples:
+        log_s2  = np.array(drv_samples["log_sigma2"]).ravel()
+        log_ell = np.array(drv_samples["log_ell"]).ravel()
+        sigma2  = np.exp(log_s2)
+        ell     = np.exp(log_ell)
+
+        # prior densities for reference
+        from scipy.stats import norm
+        s2_grid  = np.linspace(sigma2.min() * 0.8, sigma2.max() * 1.2, 300)
+        ell_grid = np.linspace(ell.min() * 0.8, ell.max() * 1.2, 300)
+        prior_s2  = norm.pdf(np.log(s2_grid), LOG_SIGMA2_MEAN, LOG_SIGMA2_STD) / s2_grid
+        prior_ell = norm.pdf(np.log(ell_grid), LOG_ELL_MEAN, LOG_ELL_STD) / ell_grid
+
+        hp_path = out_path.replace(".png", "_hyperparams.png")
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+
+        axes[0].hist(sigma2, bins=60, density=True, color="tomato", alpha=0.5,
+                     label="Posterior")
+        axes[0].plot(s2_grid, prior_s2, "k--", lw=1.5, label="Prior")
+        axes[0].set_xlabel(r"Signal variance  $\sigma^2$")
+        axes[0].set_ylabel("Density")
+        axes[0].set_title(r"Posterior  $\sigma^2$")
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.2)
+
+        axes[1].hist(ell, bins=60, density=True, color="tomato", alpha=0.5,
+                     label="Posterior")
+        axes[1].plot(ell_grid, prior_ell, "k--", lw=1.5, label="Prior")
+        axes[1].set_xlabel(r"Lengthscale  $\ell$  (years)")
+        axes[1].set_ylabel("Density")
+        axes[1].set_title(r"Posterior  $\ell$")
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.2)
+
+        fig.suptitle(r"Matérn 3/2 GP hyperparameter posteriors", fontsize=13)
+        fig.tight_layout()
+        plt.savefig(hp_path, dpi=150)
+        print(f"  Plot saved → {hp_path}")
+        plt.show()
 
 
 # ── internal: training curve plot ─────────────────────────────────────────────
@@ -359,8 +401,8 @@ def parse_args():
     p.add_argument("--mcmc-path",      default="mcmc_samples.pkl")
     p.add_argument("--n-steps",   type=int, default=15_000,
                    help="DeepRV training steps (default 15000)")
-    p.add_argument("--num-warmup",  type=int, default=1_000)
-    p.add_argument("--num-samples", type=int, default=2_000)
+    p.add_argument("--num-warmup",  type=int, default=400)
+    p.add_argument("--num-samples", type=int, default=400)
     p.add_argument("--num-chains",  type=int, default=4)
     return p.parse_args()
 
