@@ -64,7 +64,7 @@ s          = grid_times
 
 # GP hyperparameter priors (shared by training dataloader and MCMC model)
 LOG_SIGMA2_MEAN = 2.71;  LOG_SIGMA2_STD = 0.5   # sigma2 95% CI ~ [5.5, 40], mode ~15
-LOG_ELL_MEAN    = float(jnp.log(CUTOFF / 4));  LOG_ELL_STD = 0.3   # ell 95% CI ~ [55, 182] yr
+LOG_ELL_MEAN    = float(jnp.log(CUTOFF / 4));  LOG_ELL_STD = 0.2   # ell 95% CI ~ [67, 149] yr
 
 
 # ── Matérn 3/2 kernel ─────────────────────────────────────────────────────────
