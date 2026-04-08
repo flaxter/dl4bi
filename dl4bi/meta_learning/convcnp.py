@@ -1,10 +1,12 @@
+"""Convolutional Conditional Neural Process model."""
+
 from dataclasses import field
 from typing import Callable, List, Optional
 
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-from sps.utils import build_grid
+from dl4bi_sps.utils import build_grid
 
 from ..core.conv import ConvCNPNet, ConvDeepSet
 from ..core.mlp import MLP
@@ -57,6 +59,7 @@ class ConvCNP(nn.Module):
         training: bool = False,
         **kwargs,
     ):
+        """Predict test outputs with the ConvCNP architecture."""
         B = s_ctx.shape[0]
         s_dim = len(self.s_lower)
         s_grid = build_grid(
