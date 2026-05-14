@@ -33,11 +33,30 @@ conditional_effects.deeprv_fit <- function(x, probs = c(0.05, 0.95), ...) {
          "0 <= probs[1] < probs[2] <= 1", call. = FALSE)
   }
   grid <- x$decoder$grid_coords
-  if (is.matrix(grid)) {
-    stop("conditional_effects() for unit_square / Kronecker decoders is ",
-         "not implemented in v0.1.", call. = FALSE)
-  }
   by_mode <- if (is.null(x$by_mode)) "none" else x$by_mode
+
+  # Kronecker (2D) branch: return a long data frame with one row per
+  # 2D grid point and (s_x, s_y) columns. Plot method draws a heatmap.
+  if (inherits(x$decoder, "deepRV_decoder_kron")) {
+    draws <- rstan::extract(x$stanfit, pars = c("z", "ls_x", "ls_y"))
+    mu_full <- forward_decode_kron_batched(x$decoder, draws$z,
+                                           draws$ls_x, draws$ls_y)
+    df <- data.frame(
+      grid_index = seq_len(ncol(mu_full)),
+      s_x        = grid[, 1L],
+      s_y        = grid[, 2L],
+      estimate   = colMeans(mu_full),
+      lower      = apply(mu_full, 2L, stats::quantile, probs = probs[1]),
+      upper      = apply(mu_full, 2L, stats::quantile, probs = probs[2])
+    )
+    out <- list(deepRV = df)
+    attr(out, "probs") <- probs
+    attr(out, "decoder_label") <- decoder_label(x$decoder)
+    attr(out, "by_mode") <- "kron"
+    attr(out, "grid_side") <- as.integer(x$decoder$grid_side)
+    class(out) <- c("deeprv_conditional_effects", "list")
+    return(out)
+  }
 
   draws <- rstan::extract(x$stanfit, pars = c("z", "ls"))
   ls <- draws$ls
@@ -101,6 +120,22 @@ plot.deeprv_conditional_effects <- function(x, ...) {
   df <- x[[1L]]
   decoder_label <- attr(x, "decoder_label")
   by_mode <- attr(x, "by_mode")
+  if (identical(by_mode, "kron")) {
+    # 2D heatmap of the posterior mean field. Re-form the (N_side, N_side)
+    # matrix from the column-major flattened data frame.
+    N <- attr(x, "grid_side")
+    mat <- matrix(df$estimate, nrow = N, ncol = N)  # mat[i, j] = mu_grid[i, j]
+    x_coords <- df$s_x[seq_len(N)]
+    y_coords <- df$s_y[seq(1L, N * N, by = N)]
+    graphics::image(x_coords, y_coords, mat,
+                    xlab = "s_x", ylab = "s_y",
+                    main = sprintf("deepRV smooth (%s)", decoder_label),
+                    col = grDevices::hcl.colors(64, palette = "viridis"),
+                    ...)
+    graphics::contour(x_coords, y_coords, mat, add = TRUE, drawlabels = FALSE,
+                      col = grDevices::adjustcolor("white", alpha.f = 0.5))
+    return(invisible(x))
+  }
   ylim <- range(df$lower, df$upper)
   if (identical(by_mode, "factor") && "group" %in% names(df)) {
     # One panel per group on a shared y-axis; recyclable color palette.

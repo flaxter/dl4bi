@@ -786,8 +786,18 @@ Recommended order for the v0.1 build:
    and the combination of `by = factor` with `by = numeric` (which
    the design doc doesn't ask for).
 8. **`gr = TRUE`** — ~2 days.
-9. **`load_deeprv_kron()`, `deepRV()` accepting `deepRV_decoder_kron`** —
-   Stan code path for the Kronecker composition. ~1 week.
+9. ~~**`load_deeprv_kron()`, `deepRV()` accepting `deepRV_decoder_kron`**~~ —
+   **done.** `R/stancode.R::build_stancode_kron()` emits a Stan program
+   with `matrix[N_side, N_side] z`, separate `ls_x` / `ls_y` parameters
+   (sharing one `ls_prior`), and the axis-decoder applied first along
+   columns then along rows. Flattening into `vector[L] mu` is
+   column-major so `obs_idx` maps cleanly to `load_deeprv_kron()`'s
+   `grid_coords`. `R/post_processing.R::forward_decode_kron_batched()`
+   is the matching pure-R batched forward; tests verify it matches
+   Stan's `mu` (S, L) to < 1e-4. `conditional_effects()` returns a
+   2D data frame `(grid_index, s_x, s_y, estimate, lower, upper)` and
+   the `plot()` method draws a viridis heatmap with white contour
+   overlay. `by` is rejected with Kron decoders in v0.1.
 10. **`deepRV_st(...)` + RW/AR1/decoder time priors** — ~1 week.
 11. **Vignettes, polishing, CRAN submission prep.** ~1 week.
 

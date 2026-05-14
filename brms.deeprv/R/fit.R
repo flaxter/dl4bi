@@ -60,10 +60,22 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
 
   decoder <- dr_call$decoder
   if (!inherits(decoder, "deepRV_decoder")) {
-    stop("`decoder` must be a deepRV_decoder from load_deeprv()",
-         call. = FALSE)
+    stop("`decoder` must be a deepRV_decoder from load_deeprv() or ",
+         "load_deeprv_kron()", call. = FALSE)
   }
-  validate_decoder(decoder, source = "<deeprv_brm input>")
+  is_kron <- inherits(decoder, "deepRV_decoder_kron")
+  if (is_kron) {
+    if (by_info$mode != "none") {
+      stop("deepRV(by = ...) is not supported with Kronecker decoders in v0.1",
+           call. = FALSE)
+    }
+    # The inner axis decoder is the canonical 1D artifact - validate it
+    # exactly the same way load_deeprv() would.
+    validate_decoder(decoder$x_decoder,
+                     source = "<deeprv_brm Kron x_decoder>")
+  } else {
+    validate_decoder(decoder, source = "<deeprv_brm input>")
+  }
   validate_prior_in_range(dr_call$ls_prior, decoder$ls_trained_range,
                           decoder_label = decoder_label(decoder))
 
@@ -146,12 +158,14 @@ classify_by <- function(by_val) {
 #' @export
 print.deeprv_fit <- function(x, ...) {
   cat("<deeprv_fit>\n")
-  cat(sprintf("  decoder : %s grid=%d kernel=%s\n",
-              x$decoder$domain, x$decoder$grid_size, x$decoder$kernel))
+  cat(sprintf("  decoder : %s\n", decoder_label(x$decoder)))
   cat(sprintf("  family  : %s\n", x$family$family))
   cat(sprintf("  N       : %d   L : %d   K : %d\n",
               x$standata$N, x$standata$L, x$standata$K))
-  pars <- c("b", "ls")
+  pars <- c("b")
+  pars <- c(pars,
+            if (inherits(x$decoder, "deepRV_decoder_kron"))
+              c("ls_x", "ls_y") else "ls")
   if (x$family$family == "gaussian") pars <- c(pars, "sigma")
   cat("  stanfit summary:\n")
   print(x$stanfit, pars = pars, probs = c(0.05, 0.5, 0.95))
@@ -166,6 +180,10 @@ as_family <- function(family) {
 }
 
 decoder_label <- function(dr) {
+  if (inherits(dr, "deepRV_decoder_kron")) {
+    return(sprintf("%s/grid_side=%d/kernel=%s (Kron)",
+                   dr$domain, dr$grid_side, dr$kernel))
+  }
   sprintf("%s/grid_size=%d/kernel=%s", dr$domain, dr$grid_size, dr$kernel)
 }
 

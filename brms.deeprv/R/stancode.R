@@ -59,7 +59,21 @@ family_spec <- function(family_name, by_mode = "none") {
   )
 }
 
-# Build the full Stan program. ls_prior may be NULL for the (future)
+# Build the full Stan program. Dispatches to the Kronecker codepath
+# when given a deepRV_decoder_kron; otherwise falls through to the 1D
+# build below.
+build_stancode <- function(decoder, ls_prior, family, by_mode = "none") {
+  if (inherits(decoder, "deepRV_decoder_kron")) {
+    if (by_mode != "none") {
+      stop("by != NULL is not supported with Kronecker decoders in v0.1",
+           call. = FALSE)
+    }
+    return(build_stancode_kron(decoder, ls_prior, family))
+  }
+  build_stancode_1d(decoder, ls_prior, family, by_mode)
+}
+
+# Build the 1D Stan program. ls_prior may be NULL for the (future)
 # case where ls has no user prior; for now prior_uniform is required.
 #
 # by_mode controls how the decoder's mu contributes to eta:
@@ -67,7 +81,7 @@ family_spec <- function(family_name, by_mode = "none") {
 #   "svc"    : eta_n = X[n,:] %*% b + x_by[n] * mu[obs_idx[n]]        (SVC)
 #   "factor" : matrix[G, L] z; matrix[G, L] mu; eta_n adds
 #              mu[group_idx[n], obs_idx[n]]. Single shared ls.
-build_stancode <- function(decoder, ls_prior, family, by_mode = "none") {
+build_stancode_1d <- function(decoder, ls_prior, family, by_mode = "none") {
   stopifnot(inherits(ls_prior, "deepRV_prior"))
   stopifnot(ls_prior$family == "uniform")
   stopifnot(by_mode %in% c("none", "svc", "factor"))
@@ -151,6 +165,74 @@ build_stancode <- function(decoder, ls_prior, family, by_mode = "none") {
   paste(Filter(Negate(is.null), lines), collapse = "\n")
 }
 
+# Kronecker Stan program. Latent Z is matrix[N_side, N_side]; apply the
+# axis decoder to each column with conditional ls_x, then to each row of
+# the result with ls_y. Flatten column-major into length-L mu so the
+# obs_idx -> grid mapping matches load_deeprv_kron()'s grid_coords
+# convention (col 1 varies fastest = x, then y).
+build_stancode_kron <- function(decoder, ls_prior, family) {
+  stopifnot(inherits(ls_prior, "deepRV_prior"))
+  stopifnot(ls_prior$family == "uniform")
+  stopifnot(inherits(decoder, "deepRV_decoder_kron"))
+  fs <- family_spec(family, by_mode = "none")
+  decode_body <- read_decode_functions_block()
+  ls_lo <- sprintf("%.10g", ls_prior$lower)
+  ls_hi <- sprintf("%.10g", ls_prior$upper)
+
+  lines <- c(
+    "functions {",
+    decode_body,
+    "}",
+    "data {",
+    "  int<lower=1> N;",
+    "  int<lower=1> L;",          # = N_side * N_side
+    "  int<lower=1> N_side;",
+    "  int<lower=1> cond_dim;",
+    "  int<lower=1> hidden;",
+    "  int<lower=1> K;",
+    "  matrix[N, K] X;",
+    "  matrix[N_side + cond_dim, hidden] W1;",   # axis decoder
+    "  vector[hidden]                    b1;",
+    "  matrix[hidden, N_side]            W2;",
+    "  vector[N_side]                    b2;",
+    fs$y_decl,
+    "  array[N] int<lower=1, upper=L>  obs_idx;",
+    "}",
+    "parameters {",
+    "  matrix[N_side, N_side] z;",
+    sprintf("  real<lower=%s, upper=%s> ls_x;", ls_lo, ls_hi),
+    sprintf("  real<lower=%s, upper=%s> ls_y;", ls_lo, ls_hi),
+    "  vector[K] b;",
+    fs$extra_par,
+    "}",
+    "transformed parameters {",
+    "  vector[cond_dim] cond_x;",
+    "  vector[cond_dim] cond_y;",
+    "  cond_x[1] = ls_x;",
+    "  cond_y[1] = ls_y;",
+    # Apply axis decoder along columns of z -> mid (N_side x N_side).
+    "  matrix[N_side, N_side] mid;",
+    "  for (j in 1:N_side)",
+    "    mid[, j] = decode(z[, j], cond_x, W1, b1, W2, b2);",
+    # Then along rows of mid -> mu_grid (N_side x N_side).
+    "  matrix[N_side, N_side] mu_grid;",
+    "  for (i in 1:N_side)",
+    "    mu_grid[i] = decode(to_vector(mid[i]), cond_y, W1, b1, W2, b2)';",
+    # Flatten column-major; flat index (j-1) * N_side + i picks mu_grid[i, j].
+    "  vector[L] mu = to_vector(mu_grid);",
+    "}",
+    "model {",
+    "  to_vector(z) ~ std_normal();",
+    "  b ~ std_normal();",
+    fs$extra_prior,
+    sprintf("  // ls_x, ls_y ~ uniform(%s, %s)  -- implicit from parameter bounds",
+            ls_lo, ls_hi),
+    fs$likelihood,
+    "}"
+  )
+  paste(Filter(Negate(is.null), lines), collapse = "\n")
+}
+
 # Build the standata list. Handles:
 #   - obs_idx range and length checks
 #   - family-specific y type coercion
@@ -160,6 +242,7 @@ build_stancode <- function(decoder, ls_prior, family, by_mode = "none") {
 build_standata <- function(decoder, deepRV_call, y, X, family,
                            by_mode = "none", by_values = NULL,
                            n_groups = NULL) {
+  is_kron <- inherits(decoder, "deepRV_decoder_kron")
   obs_idx <- as.integer(deepRV_call$obs_idx)
   if (length(obs_idx) != length(y)) {
     stop(sprintf(
@@ -204,20 +287,41 @@ build_standata <- function(decoder, deepRV_call, y, X, family,
     stop(sprintf("unsupported family: %s", family), call. = FALSE)
   )
 
-  out <- list(
-    N        = length(y),
-    L        = as.integer(decoder$L),
-    cond_dim = length(decoder$conditionals),
-    hidden   = ncol(decoder$weights$W1),
-    K        = ncol(X),
-    X        = X,
-    W1       = decoder$weights$W1,
-    b1       = as.array(decoder$weights$b1),
-    W2       = decoder$weights$W2,
-    b2       = as.array(decoder$weights$b2),
-    y        = y_data,
-    obs_idx  = obs_idx
-  )
+  if (is_kron) {
+    # Kronecker: axis decoder weights (shared along x and y) come from the
+    # x_decoder slot. cond_dim refers to one axis (length 1 for v0.1).
+    axis_dec <- decoder$x_decoder
+    out <- list(
+      N        = length(y),
+      L        = as.integer(decoder$L),
+      N_side   = as.integer(decoder$grid_side),
+      cond_dim = length(axis_dec$conditionals),
+      hidden   = ncol(axis_dec$weights$W1),
+      K        = ncol(X),
+      X        = X,
+      W1       = axis_dec$weights$W1,
+      b1       = as.array(axis_dec$weights$b1),
+      W2       = axis_dec$weights$W2,
+      b2       = as.array(axis_dec$weights$b2),
+      y        = y_data,
+      obs_idx  = obs_idx
+    )
+  } else {
+    out <- list(
+      N        = length(y),
+      L        = as.integer(decoder$L),
+      cond_dim = length(decoder$conditionals),
+      hidden   = ncol(decoder$weights$W1),
+      K        = ncol(X),
+      X        = X,
+      W1       = decoder$weights$W1,
+      b1       = as.array(decoder$weights$b1),
+      W2       = decoder$weights$W2,
+      b2       = as.array(decoder$weights$b2),
+      y        = y_data,
+      obs_idx  = obs_idx
+    )
+  }
   if (by_mode == "svc") {
     if (is.null(by_values) || length(by_values) != length(y)) {
       stop("by_values must have the same length as y for SVC mode",
