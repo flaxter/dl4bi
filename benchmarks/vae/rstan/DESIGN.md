@@ -563,6 +563,64 @@ is "research-grade, not interactive."
 
 ---
 
+## 3a · v0.3 — Decoder operators (derivatives, integrals, extremes)
+
+A neural decoder gives us cheap, differentiable access to functionals of
+the spatial field that brms's exact `gp()` only delivers via dedicated
+closed forms. Concretely: once we have `f(s) = decode(z, ℓ)` as a
+differentiable function, we can also expose:
+
+- **Derivative**: `f'(s)` and `f''(s)` evaluated at the grid points,
+  computed by auto-diff through the decoder (Stan supports forward-mode
+  AD on user functions; or we ship a parallel `decode_derivative()` that
+  bakes in the JVP analytically).
+- **Integral**: `int f(s) ds` over `[a, b] ⊂ [0, 1]` via a learned or
+  quadrature-based reduction over the decoded grid.
+- **Extremes**: posterior on `max_s f(s)` / `argmax_s f(s)`, computed by
+  evaluating `decode` over the full grid and reducing per draw.
+
+These are useful in brms in several places brms's `gp()` can't easily
+reach:
+
+| Use case | Term |
+|---|---|
+| Monotone smooth | `deepRV_monotone(s, ...)` — penalty / prior enforcing `f'(s) > 0` over the grid |
+| Convex / concave smooth | `deepRV_convex(s, ...)` — same with `f''(s) > 0` |
+| Total cumulative effect | `deepRV_integral(s, ...)` — eta receives `int f` rather than `f` itself |
+| Peak detection | `deepRV_extreme(s, ...)` — pose priors on `argmax f` or `max f` directly |
+
+This naturally complements brms's existing `mo()` (monotonic) effects
+which are for ordered factors — `deepRV_monotone()` would give the
+continuous analogue for `gp()`-style spatial smooths.
+
+### 3a.1 Implementation sketch
+
+- The decoder forward is already in Stan via `decode_mlp.stan`. Adding a
+  differentiable derivative path means writing `decode_derivative(z, ℓ,
+  W1, b1, W2, b2)` that returns the per-grid-point derivative analytically
+  (chain rule through the relu / matmul). Same for integral: a fixed
+  quadrature against the grid points (trapezoidal is fine at L ≥ 100).
+- Inference side: the Stan model still has `vector[L] mu = decode(z,
+  cond, ...)`, but the likelihood term gets multiplied or replaced by
+  the operator output. For monotone, we add `target += sum(log(Phi(f'/sigma)))`
+  or similar soft penalty (or a hard reject via a clever prior).
+- Catalog: no retraining is required for the basic derivative /
+  integral. For "trained" operators (an MLP head that learns to
+  emit the integral directly given `z, ℓ`), we'd ship one decoder
+  per operator. Up to four decoders per `(grid_size, kernel)`,
+  which 4× the catalog size.
+
+### 3a.2 Why this is easier than the gp() equivalent
+
+brms::gp() supports monotone GPs only via projected-process tricks that
+many users find opaque. A `deepRV_monotone()` would replace those with
+a single formula term that emits a hard-monotone smooth out of a
+black-box decoder — directly composable with brms's other formula
+machinery. Combined with the v0.1 wall-time advantage at large L, this
+is where deepRV becomes a strictly better tool, not just a faster one.
+
+---
+
 ## 4 · Lessons learned from the prototype (read this before writing code)
 
 These are non-obvious gotchas surfaced during the prototype work. Carry
