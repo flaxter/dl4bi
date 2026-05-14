@@ -26,6 +26,10 @@ should be here, with pointers into the prototype code on the branch.
 | `benchmarks/vae/rstan/gmlp_decode.stan`, `export_gmlp_decoder.py`, `verify_gmlp_numpy.py`, `check_gmlp_match.R`, `run_gmlp_hmc.R` | Same pipeline for `gMLPDeepRV(num_blks=2)`. **138 min sampling at L=256.** Forward matches JAX to 1.4e-6 |
 | `benchmarks/vae/rstan/gmlp_decode_impl.hpp`, `gmlp_decode_extc.stan`, `run_gmlp_hmc_extc.R` | External templated C++ implementation of gMLP `decode` linked via rstan `--allow-undefined`. **81 min sampling at L=256.** |
 | `benchmarks/vae/rstan/RESULTS.md` | Summary table of all four runs (MLP all-Stan, MLP extC, gMLP all-Stan, gMLP extC) |
+| `benchmarks/vae/rstan/train_decoders.py` | **§8 step 1.** YAML-driven catalog trainer. Trains one `MLPDeepRV(dims=[L,L])` per `(grid_size, kernel)` on `[0, 1]`, emits a JSON per decoder + a `manifest.json`. Fingerprint-aware skip on rerun. |
+| `benchmarks/vae/rstan/pack_decoders.R` | **§8 step 1.** Converts the JSON intermediates into canonical `.rds` files per §2.2 + a `manifest.json` mapping fingerprint → filename. Re-computes the fingerprint in R and aborts if it disagrees with Python. |
+| `benchmarks/vae/rstan/verify_rds.R` | **§8 step 1.** Loads a packed `.rds`, exposes `mlp_decode.stan::decode` via rstan, and verifies the embedded JAX test cases match Stan's forward to < 1e-5. The install-time check from §4.8. |
+| `benchmarks/vae/rstan/configs/v0.1.yaml`, `configs/smoke.yaml` | Catalog spec for v0.1 (8 grids × 4 kernels, 100k steps) and a 2-decoder smoke spec (~3 s end-to-end). |
 
 ### 1.2 Empirical baseline that drove this design
 
@@ -114,6 +118,18 @@ list(
 
 The fingerprint is the lookup key. `load_deeprv(...)` errors if a fingerprint
 isn't in the shipped manifest.
+
+**Canonical fingerprint format** (implemented in `train_decoders.py` and
+`pack_decoders.R`):
+
+```
+sha256("<arch>|<arch_version>|<domain>|<grid_size>|<kernel>|<ls_lo>|<ls_hi>")
+```
+
+Floats are formatted with `%.8f` (e.g. `0.01000000`, `1.00000000`). This
+is the one format that produces byte-identical strings in Python and R —
+`repr(float)`, `str()`, `format()`, JSON, etc. all disagree at the edges.
+See §4.8.
 
 ### 2.3 R-side public API
 
@@ -618,7 +634,22 @@ file after first compile. Subsequent fits skip the 1–2 min compile.
 The cache becomes stale on Stan code changes — must be invalidated
 when bumping `arch_version`.
 
-### 4.8 The forward-pass match check is the most important test
+### 4.8 Python ↔ R float formatting disagrees everywhere except `%.8f`
+
+When a fingerprint must agree across Python and R, you cannot use:
+
+- `repr(float(x))` / `str(float(x))` — Python writes `1.0`, R has no
+  equivalent (`as.character(1.0)` gives `"1"`).
+- `formatC(x, digits=17, format="g")` — pads with leading spaces and
+  produces different significant-figure counts than Python's `repr`.
+- `jsonlite::toJSON(1.0)` — writes `1`; `json.dumps(1.0)` writes `1.0`.
+
+`f"{x:.8f}"` in Python and `sprintf("%.8f", x)` in R produce identical
+bytes for all finite doubles within ~8 fractional digits of precision.
+This is what the v0.1 fingerprint uses (§2.2). If you ever need more
+precision in the fingerprint, you'll have to special-case it.
+
+### 4.9 The forward-pass match check is the most important test
 
 When porting an architecture, the Stan implementation can be silently
 wrong in ways that still produce plausible-looking HMC output (Rhat=1,
@@ -686,9 +717,13 @@ fit time pointing the user to lower `adapt_delta` or use fewer iterations.
 
 Recommended order for the v0.1 build:
 
-1. **Training pipeline** — generalize `benchmarks/vae/rstan/export_mlp_decoder.py`
-   to accept a YAML config, train all 32 decoders, output canonical `.rds`
-   files. ~1 GPU-day or ~1 CPU-week.
+1. ~~**Training pipeline**~~ — **done in `77286a6`.** YAML config →
+   `train_decoders.py` → per-decoder JSON → `pack_decoders.R` → canonical
+   `.rds` + `manifest.json`. Smoke run (L=10, 1000 steps, 2 decoders)
+   round-trips end-to-end with forward-match at 1.4e-7 against the JAX
+   reference. The full 32-decoder catalog still has to be **trained** —
+   that's the wall-clock cost (~1 GPU-day / ~1 CPU-week), but the
+   pipeline is built.
 2. **R package skeleton + `load_deeprv()`** — load from `inst/extdata/decoders/`
    with manifest validation. ~2 days.
 3. **Coordinate helpers** — `rescale_to_unit_interval()`, `which_grid_points()`,
@@ -714,19 +749,58 @@ the catalog.**
 
 ## 9 · Handoff bundle
 
+Branch: `claude/deeprv-rstan-integration-VDtiw` at `77286a6`.
+Step 1 (training pipeline) is done; step 2 (R package skeleton +
+`load_deeprv()`) is the next thing to write.
+
 The fresh agent should:
 
-1. **Read this document end-to-end.**
-2. **Read `benchmarks/vae/rstan/RESULTS.md`** for empirical context.
-3. **Run the existing prototype** to verify the dev environment works:
+1. **Read this document end-to-end.** Especially §2 (scope), §4 (the
+   non-obvious gotchas) and §8 (build order).
+2. **Read `benchmarks/vae/rstan/RESULTS.md`** for the empirical baseline
+   that drove the design (~42 s MLP, ~138 min gMLP).
+3. **Verify the environment** — the original prototype's forward-parity
+   check is the cheap, fast smoke test:
    ```bash
-   cd /home/user/dl4bi
-   uv run --extra cpu --extra benchmarks python benchmarks/vae/rstan/export_mlp_decoder.py
-   Rscript benchmarks/vae/rstan/check_match.R       # should PASS at < 1e-5
-   Rscript benchmarks/vae/rstan/run_hmc.R           # should sample in ~1 min including cache load
+   cd <repo>
+   Rscript benchmarks/vae/rstan/check_match.R   # PASS at ~6e-7, < 1 min
    ```
-4. **Start with §8 step 1** — generalize the training script. The R package
-   work is meaningless until the catalog exists.
+   If that fails, the dev environment is wrong; see §4.6 for the most
+   likely cause (Boost headers on Ubuntu).
+4. **Verify the new catalog pipeline still round-trips** — also fast:
+   ```bash
+   uv run --extra cpu --extra benchmarks python \
+     benchmarks/vae/rstan/train_decoders.py \
+     --config benchmarks/vae/rstan/configs/smoke.yaml
+   Rscript benchmarks/vae/rstan/pack_decoders.R \
+     benchmarks/vae/rstan/artifacts/decoders/smoke
+   Rscript benchmarks/vae/rstan/verify_rds.R \
+     benchmarks/vae/rstan/artifacts/decoders/smoke/unit_interval_10_matern_1_2.rds
+   # Final line should read "PASS (< 1e-05)".
+   ```
+   Total wall time: ~30 s including R compile cache miss.
+5. **Decide on the catalog before the package work, or after.** Two
+   reasonable paths:
+   - **Train the catalog first** (`configs/v0.1.yaml`, ~1 CPU-week
+     unattended). Then the R package has real artifacts to load.
+   - **Skip to §8 step 2** and use the smoke artifacts (or a slightly
+     enlarged smoke config — e.g. one full `(grid_size, kernel)` pair
+     at 100k steps) as the test fixture for the package work. Train
+     the full catalog later, before any release.
+   The second path is faster to a working package; the first path
+   gives a real demo. Pick based on what the user actually needs next.
+6. **Start §8 step 2** — R package skeleton (`brms.deeprv/`) and
+   `load_deeprv()`. See §2.3.1 and §2.9 for the target shape.
 
-Questions for the user should be batched and routed back through the
-issue tracker on the `claude/deeprv-rstan-integration-VDtiw` branch.
+Open questions to batch back to the user when they come up:
+
+- **Where does the package live?** Same repo (`R/brms.deeprv/`) or its
+  own repo? The design doc assumes a separate package eventually but
+  is silent on the location during development.
+- **CRAN strategy.** The package will ship 32 binary `.rds` files
+  (~tens of MB total). CRAN's 5 MB tarball limit forces either a
+  download-on-demand model (download from a GitHub release on first
+  `load_deeprv()`) or non-CRAN distribution.
+- **Whose JAX version is the catalog frozen against?** Bumping JAX
+  may shift weights below the 1e-5 forward-match tol; the
+  `arch_version` field exists to gate this.
