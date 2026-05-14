@@ -768,14 +768,18 @@ Recommended order for the v0.1 build:
    base-graphics `plot()` method (line + CI ribbon). 2D Kronecker
    heatmap deferred to v0.2 along with the Kronecker fit path.
 7. **`by = factor`, `by = numeric`, `ls_pooling`** —
-   **`by = numeric` (SVC) done.** Single decoder; Stan likelihood
-   uses `x_by .* mu[obs_idx]`. `R/fit.R::classify_by()` routes by
-   `is.numeric()`. `R/stancode.R` factors the spatial term through a
-   `by_mode` argument (`"none"` / `"svc"`). Remaining: `by = factor`
-   (matrix `z`, vector `ls`, group-indexed contributions) and
-   `ls_pooling` variants. `R/post_processing.R::posterior_eta_draws()`
-   already handles the SVC multiplier so post-processing carries
-   forward unchanged for `by = factor` once that lands.
+   **`by = numeric` (SVC) and `by = factor` (groups) done with
+   `ls_pooling = "complete"`.** SVC: Stan likelihood uses
+   `x_by .* mu[obs_idx]`. Factor: `matrix[G, L] z; matrix[G, L] mu`
+   via per-group decode loop, single shared `ls`, spatial gathered
+   as `mu[group_idx[n], obs_idx[n]]`. `R/fit.R::classify_by()` routes
+   `NULL` / `numeric` / `factor|character`. Post-processing
+   (`posterior_eta_draws`, `conditional_effects`, plot) all handle
+   factor mode (conditional_effects emits one row per (group, grid)
+   and the plot method facets by group). Remaining: `ls_pooling` !=
+   `"complete"` (hierarchical or independent per-group length scales)
+   and the combination of `by = factor` with `by = numeric` (which
+   the design doc doesn't ask for).
 8. **`gr = TRUE`** — ~2 days.
 9. **`load_deeprv_kron()`, `deepRV()` accepting `deepRV_decoder_kron`** —
    Stan code path for the Kronecker composition. ~1 week.

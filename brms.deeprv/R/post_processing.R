@@ -21,20 +21,37 @@ posterior_eta_draws <- function(fit) {
     stop("posterior_eta_draws() requires a deeprv_fit object", call. = FALSE)
   }
   draws <- rstan::extract(fit$stanfit, pars = c("z", "ls", "b"))
-  z <- draws$z              # (S, L)
   ls <- draws$ls            # (S,)
-  b <- as.matrix(draws$b)   # (S, K); promotes K=1 case to a column
-  mu_full <- forward_decode_batched(fit$decoder, z, ls)  # (S, L)
-
-  X <- fit$X                                            # (N, K)
+  b <- as.matrix(draws$b)   # (S, K)
+  X <- fit$X                # (N, K)
   obs_idx <- as.integer(fit$standata$obs_idx)
-  # b (S, K) x t(X) (K, N) -> (S, N)
-  fixed <- b %*% t(X)
-  spatial <- mu_full[, obs_idx, drop = FALSE]           # (S, N)
   by_mode <- if (is.null(fit$by_mode)) "none" else fit$by_mode
+
+  fixed <- b %*% t(X)       # (S, N)
+
+  if (by_mode == "factor") {
+    # z is matrix[G, L] per Stan: extract pulls (S, G, L). For each draw
+    # and group, decode separately, then gather by group_idx + obs_idx.
+    z <- draws$z                    # (S, G, L)
+    S <- dim(z)[1L]; G <- dim(z)[2L]; L <- dim(z)[3L]
+    group_idx <- as.integer(fit$standata$group_idx)
+    N <- length(group_idx)
+    spatial <- matrix(0, nrow = S, ncol = N)
+    # Per-group batched forward over draws keeps the inner loop in vectorised R.
+    for (g in seq_len(G)) {
+      mu_g <- forward_decode_batched(fit$decoder, z[, g, ], ls)  # (S, L)
+      cols <- which(group_idx == g)
+      if (length(cols) > 0L) {
+        spatial[, cols] <- mu_g[, obs_idx[cols], drop = FALSE]
+      }
+    }
+    return(fixed + spatial)
+  }
+
+  z <- draws$z                                          # (S, L)
+  mu_full <- forward_decode_batched(fit$decoder, z, ls) # (S, L)
+  spatial <- mu_full[, obs_idx, drop = FALSE]           # (S, N)
   if (by_mode == "svc") {
-    # Element-wise multiply each column of spatial by the corresponding
-    # x_by[n] - matches the Stan likelihood's `x_by .* mu[obs_idx]`.
     spatial <- sweep(spatial, 2L, as.numeric(fit$by_values), FUN = "*")
   }
   fixed + spatial

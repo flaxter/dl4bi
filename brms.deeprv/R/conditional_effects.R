@@ -32,30 +32,47 @@ conditional_effects.deeprv_fit <- function(x, probs = c(0.05, 0.95), ...) {
     stop("`probs` must be a numeric vector of length 2 with ",
          "0 <= probs[1] < probs[2] <= 1", call. = FALSE)
   }
-  draws <- rstan::extract(x$stanfit, pars = c("z", "ls"))
-  mu_full <- forward_decode_batched(x$decoder, draws$z, draws$ls)  # (S, L)
-
-  estimate <- colMeans(mu_full)
-  lower <- apply(mu_full, 2L, stats::quantile, probs = probs[1])
-  upper <- apply(mu_full, 2L, stats::quantile, probs = probs[2])
-
   grid <- x$decoder$grid_coords
   if (is.matrix(grid)) {
-    # 2D decoder (Kronecker). Not yet a fittable target, so we don't
-    # expect to reach this branch in v0.1 - error if we do.
     stop("conditional_effects() for unit_square / Kronecker decoders is ",
          "not implemented in v0.1.", call. = FALSE)
   }
-  df <- data.frame(
-    grid_index = seq_along(grid),
-    s          = as.numeric(grid),
-    estimate   = estimate,
-    lower      = lower,
-    upper      = upper
-  )
+  by_mode <- if (is.null(x$by_mode)) "none" else x$by_mode
+
+  draws <- rstan::extract(x$stanfit, pars = c("z", "ls"))
+  ls <- draws$ls
+
+  if (by_mode == "factor") {
+    z <- draws$z                                       # (S, G, L)
+    G <- dim(z)[2L]
+    df_list <- lapply(seq_len(G), function(g) {
+      mu_g <- forward_decode_batched(x$decoder, z[, g, ], ls)
+      data.frame(
+        group      = if (is.null(x$by_levels)) as.character(g) else x$by_levels[g],
+        grid_index = seq_along(grid),
+        s          = as.numeric(grid),
+        estimate   = colMeans(mu_g),
+        lower      = apply(mu_g, 2L, stats::quantile, probs = probs[1]),
+        upper      = apply(mu_g, 2L, stats::quantile, probs = probs[2])
+      )
+    })
+    df <- do.call(rbind, df_list)
+    rownames(df) <- NULL
+  } else {
+    mu_full <- forward_decode_batched(x$decoder, draws$z, ls)
+    df <- data.frame(
+      grid_index = seq_along(grid),
+      s          = as.numeric(grid),
+      estimate   = colMeans(mu_full),
+      lower      = apply(mu_full, 2L, stats::quantile, probs = probs[1]),
+      upper      = apply(mu_full, 2L, stats::quantile, probs = probs[2])
+    )
+  }
+
   out <- list(deepRV = df)
   attr(out, "probs") <- probs
   attr(out, "decoder_label") <- decoder_label(x$decoder)
+  attr(out, "by_mode") <- by_mode
   class(out) <- c("deeprv_conditional_effects", "list")
   out
 }
@@ -82,18 +99,43 @@ print.deeprv_conditional_effects <- function(x, ...) {
 #' @export
 plot.deeprv_conditional_effects <- function(x, ...) {
   df <- x[[1L]]
-  probs <- attr(x, "probs")
+  decoder_label <- attr(x, "decoder_label")
+  by_mode <- attr(x, "by_mode")
   ylim <- range(df$lower, df$upper)
-  graphics::plot(df$s, df$estimate, type = "l",
-                 xlab = "s", ylab = "mu(s)",
-                 ylim = ylim,
-                 main = sprintf("deepRV smooth (%s)",
-                                attr(x, "decoder_label")),
-                 ...)
-  graphics::polygon(c(df$s, rev(df$s)),
-                    c(df$lower, rev(df$upper)),
-                    col = grDevices::adjustcolor("steelblue", alpha.f = 0.25),
-                    border = NA)
-  graphics::lines(df$s, df$estimate, lwd = 2, col = "steelblue")
+  if (identical(by_mode, "factor") && "group" %in% names(df)) {
+    # One panel per group on a shared y-axis; recyclable color palette.
+    groups <- unique(df$group)
+    G <- length(groups)
+    nrow_p <- ceiling(sqrt(G))
+    ncol_p <- ceiling(G / nrow_p)
+    op <- graphics::par(mfrow = c(nrow_p, ncol_p),
+                        oma = c(0, 0, 2, 0))
+    on.exit(graphics::par(op), add = TRUE)
+    for (g in groups) {
+      sub <- df[df$group == g, , drop = FALSE]
+      graphics::plot(sub$s, sub$estimate, type = "n",
+                     xlab = "s", ylab = "mu(s)",
+                     ylim = ylim, main = paste0("group: ", g), ...)
+      graphics::polygon(c(sub$s, rev(sub$s)),
+                        c(sub$lower, rev(sub$upper)),
+                        col = grDevices::adjustcolor("steelblue",
+                                                     alpha.f = 0.25),
+                        border = NA)
+      graphics::lines(sub$s, sub$estimate, lwd = 2, col = "steelblue")
+    }
+    graphics::mtext(sprintf("deepRV smooth (%s)", decoder_label),
+                    outer = TRUE)
+  } else {
+    graphics::plot(df$s, df$estimate, type = "l",
+                   xlab = "s", ylab = "mu(s)", ylim = ylim,
+                   main = sprintf("deepRV smooth (%s)", decoder_label),
+                   ...)
+    graphics::polygon(c(df$s, rev(df$s)),
+                      c(df$lower, rev(df$upper)),
+                      col = grDevices::adjustcolor("steelblue",
+                                                   alpha.f = 0.25),
+                      border = NA)
+    graphics::lines(df$s, df$estimate, lwd = 2, col = "steelblue")
+  }
   invisible(x)
 }

@@ -71,9 +71,10 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
 
   X <- build_design_matrix(parsed$rhs, data)
 
-  if (by_info$mode == "svc" && length(by_info$values) != length(y)) {
+  if (by_info$mode %in% c("svc", "factor") &&
+      length(by_info$values) != length(y)) {
     stop(sprintf(
-      "deepRV(by = ...) numeric vector length (%d) must match nrow(data) (%d)",
+      "deepRV(by = ...) vector length (%d) must match nrow(data) (%d)",
       length(by_info$values), length(y)),
       call. = FALSE)
   }
@@ -82,7 +83,8 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
                              by_mode = by_info$mode)
   standata <- build_standata(decoder, dr_call, y, X, family = fam$family,
                              by_mode = by_info$mode,
-                             by_values = by_info$values)
+                             by_values = by_info$values,
+                             n_groups = by_info$n_groups)
 
   sampling_args <- list(
     model_code = stancode,
@@ -98,36 +100,44 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
   stanfit <- do.call(rstan::stan, sampling_args)
 
   out <- list(
-    stanfit  = stanfit,
-    stancode = stancode,
-    standata = standata,
-    decoder  = decoder,
-    deepRV   = dr_call,
-    family   = fam,
-    X        = X,
-    by_mode  = by_info$mode,
-    by_values = by_info$values
+    stanfit   = stanfit,
+    stancode  = stancode,
+    standata  = standata,
+    decoder   = decoder,
+    deepRV    = dr_call,
+    family    = fam,
+    X         = X,
+    by_mode   = by_info$mode,
+    by_values = by_info$values,
+    by_levels = by_info$levels,
+    n_groups  = by_info$n_groups
   )
   class(out) <- c("deeprv_fit", "list")
   out
 }
 
 # Classify the deepRV(..., by = ...) value:
-#   NULL           -> mode = "none"
-#   numeric vector -> mode = "svc"     (spatially varying coefficient)
-#   factor/char    -> stop pending the by = factor lift
+#   NULL           -> mode = "none"   (single shared field)
+#   numeric vector -> mode = "svc"    (spatially varying coefficient)
+#   factor / chr   -> mode = "factor" (G group-specific smooths)
+#
+# For factor mode, normalises via factor() so character vectors and
+# already-factor inputs produce the same integer group ids + level names.
 classify_by <- function(by_val) {
   if (is.null(by_val)) {
     return(list(mode = "none", values = NULL))
   }
-  if (is.numeric(by_val) && !is.factor(by_val)) {
-    return(list(mode = "svc", values = as.numeric(by_val)))
-  }
   if (is.factor(by_val) || is.character(by_val)) {
-    stop("deepRV(by = <factor/character>) for group-specific smooths ",
-         "is reserved for a follow-up. Currently only by = NULL (single ",
-         "shared field) and by = <numeric vector> (SVC) are supported.",
-         call. = FALSE)
+    f <- factor(by_val)
+    return(list(
+      mode      = "factor",
+      values    = as.integer(f),
+      n_groups  = length(levels(f)),
+      levels    = levels(f)
+    ))
+  }
+  if (is.numeric(by_val)) {
+    return(list(mode = "svc", values = as.numeric(by_val)))
   }
   stop("deepRV(by = ...) must be NULL, a numeric vector, or a factor",
        call. = FALSE)

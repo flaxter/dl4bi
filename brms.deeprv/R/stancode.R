@@ -30,12 +30,14 @@ read_decode_functions_block <- function() {
 
 # Family-specific Stan snippets. The `by_mode` controls the form of the
 # spatial term inside the likelihood:
-#   "none" -> mu[obs_idx]
-#   "svc"  -> x_by .* mu[obs_idx]    (element-wise SVC)
+#   "none"   -> mu[obs_idx]
+#   "svc"    -> x_by .* mu[obs_idx]              (element-wise SVC)
+#   "factor" -> spatial[]   (Stan gathers per-obs from mu[group_idx, obs_idx])
 family_spec <- function(family_name, by_mode = "none") {
   spatial_term <- switch(by_mode,
-    none = "mu[obs_idx]",
-    svc  = "x_by .* mu[obs_idx]",
+    none   = "mu[obs_idx]",
+    svc    = "x_by .* mu[obs_idx]",
+    factor = "spatial",
     stop(sprintf("unknown by_mode: %s", by_mode), call. = FALSE)
   )
   switch(family_name,
@@ -61,17 +63,52 @@ family_spec <- function(family_name, by_mode = "none") {
 # case where ls has no user prior; for now prior_uniform is required.
 #
 # by_mode controls how the decoder's mu contributes to eta:
-#   "none" : eta_n = X[n,:] %*% b + mu[obs_idx[n]]                  (default)
-#   "svc"  : eta_n = X[n,:] %*% b + x_by[n] * mu[obs_idx[n]]        (SVC)
+#   "none"   : eta_n = X[n,:] %*% b + mu[obs_idx[n]]                  (default)
+#   "svc"    : eta_n = X[n,:] %*% b + x_by[n] * mu[obs_idx[n]]        (SVC)
+#   "factor" : matrix[G, L] z; matrix[G, L] mu; eta_n adds
+#              mu[group_idx[n], obs_idx[n]]. Single shared ls.
 build_stancode <- function(decoder, ls_prior, family, by_mode = "none") {
   stopifnot(inherits(ls_prior, "deepRV_prior"))
   stopifnot(ls_prior$family == "uniform")
-  stopifnot(by_mode %in% c("none", "svc"))
+  stopifnot(by_mode %in% c("none", "svc", "factor"))
   fs <- family_spec(family, by_mode)
   decode_body <- read_decode_functions_block()
   ls_lo <- sprintf("%.10g", ls_prior$lower)
   ls_hi <- sprintf("%.10g", ls_prior$upper)
-  extra_data <- if (by_mode == "svc") "  vector[N] x_by;" else NULL
+
+  extra_data <- switch(by_mode,
+    none   = NULL,
+    svc    = "  vector[N] x_by;",
+    factor = c("  int<lower=1> G;",
+               "  array[N] int<lower=1, upper=G> group_idx;")
+  )
+  # Parameter declarations and transformed parameter body differ by mode:
+  # for "factor" the latent z is matrix[G, L] and mu is matrix[G, L].
+  if (by_mode == "factor") {
+    z_par <- "  matrix[G, L] z;"
+    z_prior <- "  to_vector(z) ~ std_normal();"
+    mu_block <- c(
+      "  vector[cond_dim] cond;",
+      "  cond[1] = ls;",
+      "  matrix[G, L] mu;",
+      "  for (g in 1:G)",
+      "    mu[g] = decode(to_vector(z[g]), cond, W1, b1, W2, b2)';"
+    )
+    # Stan needs the spatial vector built before it's used in the likelihood.
+    pre_likelihood <- c(
+      "  vector[N] spatial;",
+      "  for (n in 1:N) spatial[n] = mu[group_idx[n], obs_idx[n]];"
+    )
+  } else {
+    z_par <- "  vector[L] z;"
+    z_prior <- "  z ~ std_normal();"
+    mu_block <- c(
+      "  vector[cond_dim] cond;",
+      "  cond[1] = ls;",
+      "  vector[L] mu = decode(z, cond, W1, b1, W2, b2);"
+    )
+    pre_likelihood <- NULL
+  }
 
   lines <- c(
     "functions {",
@@ -93,22 +130,21 @@ build_stancode <- function(decoder, ls_prior, family, by_mode = "none") {
     extra_data,
     "}",
     "parameters {",
-    "  vector[L] z;",
+    z_par,
     sprintf("  real<lower=%s, upper=%s> ls;", ls_lo, ls_hi),
     "  vector[K] b;",
     fs$extra_par,
     "}",
     "transformed parameters {",
-    "  vector[cond_dim] cond;",
-    "  cond[1] = ls;",
-    "  vector[L] mu = decode(z, cond, W1, b1, W2, b2);",
+    mu_block,
     "}",
     "model {",
-    "  z ~ std_normal();",
+    z_prior,
     "  b ~ std_normal();",
     fs$extra_prior,
     sprintf("  // ls ~ uniform(%s, %s)  -- implicit from parameter bounds",
             ls_lo, ls_hi),
+    pre_likelihood,
     fs$likelihood,
     "}"
   )
@@ -119,9 +155,11 @@ build_stancode <- function(decoder, ls_prior, family, by_mode = "none") {
 #   - obs_idx range and length checks
 #   - family-specific y type coercion
 #   - design matrix X (defaults to intercept-only if rhs_formula is NULL)
-#   - by_values for SVC (passed in as `x_by`)
+#   - by_values for SVC (passed in as `x_by`) or factor (passed as
+#     integer group_idx + G)
 build_standata <- function(decoder, deepRV_call, y, X, family,
-                           by_mode = "none", by_values = NULL) {
+                           by_mode = "none", by_values = NULL,
+                           n_groups = NULL) {
   obs_idx <- as.integer(deepRV_call$obs_idx)
   if (length(obs_idx) != length(y)) {
     stop(sprintf(
@@ -186,6 +224,17 @@ build_standata <- function(decoder, deepRV_call, y, X, family,
            call. = FALSE)
     }
     out$x_by <- as.numeric(by_values)
+  } else if (by_mode == "factor") {
+    if (is.null(by_values) || length(by_values) != length(y)) {
+      stop("by_values (group_idx) must have the same length as y for ",
+           "factor mode", call. = FALSE)
+    }
+    if (is.null(n_groups) || n_groups < 1L) {
+      stop("n_groups must be a positive integer for factor mode",
+           call. = FALSE)
+    }
+    out$G <- as.integer(n_groups)
+    out$group_idx <- as.integer(by_values)
   }
   out
 }

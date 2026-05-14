@@ -71,19 +71,6 @@ test_that("posterior_eta_draws() applies the SVC multiplier", {
   expect_lt(max(abs(eta - expected)), 1e-10)
 })
 
-test_that("deeprv_brm() still rejects by = <factor>", {
-  dr <- load_deeprv("unit_interval", grid_size = 10, kernel = "matern_1_2")
-  df <- data.frame(s = dr$grid_coords, y = rep(1L, dr$L),
-                   obs_idx = seq_len(dr$L),
-                   group = factor(rep(c("a", "b"), length.out = dr$L)))
-  expect_error(
-    deeprv_brm(y ~ deepRV(s, by = group, decoder = dr, obs_idx = obs_idx,
-                          ls_prior = prior_uniform(0.05, 0.5)),
-               data = df, family = poisson()),
-    "group-specific smooths"
-  )
-})
-
 test_that("deeprv_brm() catches length mismatch on numeric by", {
   dr <- load_deeprv("unit_interval", grid_size = 10, kernel = "matern_1_2")
   df <- data.frame(s = dr$grid_coords, y = rep(1L, dr$L),
