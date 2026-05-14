@@ -25,9 +25,30 @@ prior_uniform <- function(lower, upper) {
 
 #' @export
 print.deepRV_prior <- function(x, ...) {
-  cat(sprintf("<deepRV_prior: %s(lower=%g, upper=%g)>\n",
-              x$family, x$lower, x$upper))
+  if (x$family == "exponential") {
+    cat(sprintf("<deepRV_prior: exponential(rate=%g)>\n", x$rate))
+  } else {
+    cat(sprintf("<deepRV_prior: %s(lower=%g, upper=%g)>\n",
+                x$family, x$lower, x$upper))
+  }
   invisible(x)
+}
+
+#' Exponential prior for non-negative scalar parameters
+#'
+#' Used as the default prior for the random-walk innovation scale
+#' \code{sigma_t} in [deepRV_st()].
+#'
+#' @param rate Positive scalar; the exponential rate parameter.
+#' @return A `deepRV_prior` object.
+#' @export
+prior_exp <- function(rate) {
+  if (!is.numeric(rate) || length(rate) != 1L || !is.finite(rate) || rate <= 0) {
+    stop("`rate` must be a positive finite scalar", call. = FALSE)
+  }
+  out <- list(family = "exponential", rate = as.numeric(rate))
+  class(out) <- c("deepRV_prior", "list")
+  out
 }
 
 # Lower bound of a prior's support, used for Stan parameter bounds.
@@ -52,6 +73,7 @@ stan_prior_statement <- function(prior, param_name) {
   switch(prior$family,
     uniform = sprintf("  // %s ~ uniform(%g, %g) - implicit from bounds",
                       param_name, prior$lower, prior$upper),
+    exponential = sprintf("  %s ~ exponential(%g);", param_name, prior$rate),
     stop(sprintf("unsupported prior family: %s", prior$family), call. = FALSE)
   )
 }

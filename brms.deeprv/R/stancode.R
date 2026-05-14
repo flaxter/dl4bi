@@ -62,6 +62,75 @@ family_spec <- function(family_name, by_mode = "none") {
 # Build the full Stan program. Dispatches to the Kronecker codepath
 # when given a deepRV_decoder_kron; otherwise falls through to the 1D
 # build below.
+# Wrapper that builds the Stan source for a space-time deepRV term.
+# Currently MVP: 1D space (no Kron), RW time prior, Poisson/Gaussian.
+build_stancode_st <- function(decoder, ls_prior, sigma_t_prior, family,
+                              decoder_time = "rw") {
+  stopifnot(decoder_time == "rw")
+  stopifnot(inherits(ls_prior, "deepRV_prior"))
+  stopifnot(inherits(sigma_t_prior, "deepRV_prior"))
+  stopifnot(ls_prior$family == "uniform")
+  stopifnot(!inherits(decoder, "deepRV_decoder_kron"))
+  fs <- family_spec(family, by_mode = "none")
+  # Replace the spatial term in the likelihood with our gathered vector.
+  fs$likelihood <- sub("mu\\[obs_idx\\]", "spatial", fs$likelihood)
+  decode_body <- read_decode_functions_block()
+  ls_lo <- sprintf("%.10g", ls_prior$lower)
+  ls_hi <- sprintf("%.10g", ls_prior$upper)
+  sigma_t_prior_line <- stan_prior_statement(sigma_t_prior, "sigma_t")
+
+  lines <- c(
+    "functions {",
+    decode_body,
+    "}",
+    "data {",
+    "  int<lower=1> N;",
+    "  int<lower=1> L;",
+    "  int<lower=1> T;",
+    "  int<lower=1> cond_dim;",
+    "  int<lower=1> hidden;",
+    "  int<lower=1> K;",
+    "  matrix[N, K] X;",
+    "  matrix[L + cond_dim, hidden] W1;",
+    "  vector[hidden]               b1;",
+    "  matrix[hidden, L]            W2;",
+    "  vector[L]                    b2;",
+    fs$y_decl,
+    "  array[N] int<lower=1, upper=L>  obs_idx;",
+    "  array[N] int<lower=1, upper=T>  time_idx;",
+    "}",
+    "parameters {",
+    "  matrix[T, L] z;",
+    sprintf("  real<lower=%s, upper=%s> ls;", ls_lo, ls_hi),
+    "  real<lower=0> sigma_t;",
+    "  vector[K] b;",
+    fs$extra_par,
+    "}",
+    "transformed parameters {",
+    "  vector[cond_dim] cond;",
+    "  cond[1] = ls;",
+    # Compute the per-time spatial increment, then accumulate.
+    "  matrix[T, L] eps;",
+    "  for (t in 1:T) eps[t] = decode(to_vector(z[t]), cond, W1, b1, W2, b2)';",
+    "  matrix[T, L] F;",
+    "  F[1] = sigma_t * eps[1];",
+    "  for (t in 2:T) F[t] = F[t - 1] + sigma_t * eps[t];",
+    "}",
+    "model {",
+    "  to_vector(z) ~ std_normal();",
+    "  b ~ std_normal();",
+    fs$extra_prior,
+    sigma_t_prior_line,
+    sprintf("  // ls ~ uniform(%s, %s)  -- implicit from parameter bounds",
+            ls_lo, ls_hi),
+    "  vector[N] spatial;",
+    "  for (n in 1:N) spatial[n] = F[time_idx[n], obs_idx[n]];",
+    fs$likelihood,
+    "}"
+  )
+  paste(Filter(Negate(is.null), lines), collapse = "\n")
+}
+
 build_stancode <- function(decoder, ls_prior, family, by_mode = "none",
                            ls_pooling = "complete") {
   if (inherits(decoder, "deepRV_decoder_kron")) {
@@ -76,6 +145,59 @@ build_stancode <- function(decoder, ls_prior, family, by_mode = "none",
     return(build_stancode_kron(decoder, ls_prior, family))
   }
   build_stancode_1d(decoder, ls_prior, family, by_mode, ls_pooling)
+}
+
+# Standata for the space-time term. Same shape as 1D + adds T and
+# time_idx; obs_idx remains the spatial index.
+build_standata_st <- function(decoder, deepRV_st_call, y, X, family) {
+  obs_idx <- as.integer(deepRV_st_call$obs_idx)
+  time_idx <- as.integer(deepRV_st_call$time_idx)
+  if (length(obs_idx) != length(y) || length(time_idx) != length(y)) {
+    stop(sprintf(
+      "obs_idx (len %d), time_idx (len %d), and y (len %d) must all match",
+      length(obs_idx), length(time_idx), length(y)),
+      call. = FALSE)
+  }
+  if (any(is.na(obs_idx)) || any(obs_idx < 1L) || any(obs_idx > decoder$L)) {
+    stop(sprintf("obs_idx values must be integers in [1, L=%d]", decoder$L),
+         call. = FALSE)
+  }
+  T_full <- max(time_idx, na.rm = TRUE)
+  if (any(is.na(time_idx)) || any(time_idx < 1L)) {
+    stop("time_idx must be positive integers", call. = FALSE)
+  }
+  if (!is.matrix(X) || nrow(X) != length(y)) {
+    stop("design matrix X must have nrow == length(y)", call. = FALSE)
+  }
+  y_data <- switch(family,
+    poisson = {
+      if (!is.numeric(y) || any(y < 0) || any(y != round(y))) {
+        stop("Poisson family requires non-negative integer y", call. = FALSE)
+      }
+      as.integer(y)
+    },
+    gaussian = {
+      if (!is.numeric(y)) stop("Gaussian family requires numeric y", call. = FALSE)
+      as.numeric(y)
+    },
+    stop(sprintf("unsupported family: %s", family), call. = FALSE)
+  )
+  list(
+    N        = length(y),
+    L        = as.integer(decoder$L),
+    T        = as.integer(T_full),
+    cond_dim = length(decoder$conditionals),
+    hidden   = ncol(decoder$weights$W1),
+    K        = ncol(X),
+    X        = X,
+    W1       = decoder$weights$W1,
+    b1       = as.array(decoder$weights$b1),
+    W2       = decoder$weights$W2,
+    b2       = as.array(decoder$weights$b2),
+    y        = y_data,
+    obs_idx  = obs_idx,
+    time_idx = time_idx
+  )
 }
 
 # Build the 1D Stan program. ls_prior may be NULL for the (future)

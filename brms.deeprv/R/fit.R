@@ -49,6 +49,14 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
 
   parsed <- parse_deeprv_formula(formula, data, envir = parent.frame())
   dr_call <- parsed$deepRV[[1L]]
+
+  # Space-time term takes a different Stan path; dispatch early.
+  if (inherits(dr_call, "deepRV_st_call")) {
+    return(deeprv_brm_st(parsed, dr_call, data, fam,
+                         chains, iter, warmup, seed, cores, control,
+                         caller_env = parent.frame()))
+  }
+
   by_info <- classify_by(dr_call$by)
   # gr = TRUE is silently accepted: the package's design already computes
   # decode() once per draw and gathers via obs_idx, which is exactly what
@@ -189,6 +197,54 @@ as_family <- function(family) {
   if (is.function(family))        return(family())
   if (is.character(family))       return(get(family, mode = "function")())
   stop("`family` must be a family object, function, or string", call. = FALSE)
+}
+
+# Space-time path. Currently MVP: 1D space, RW time, no by, no covariates
+# yet (intercept only).
+deeprv_brm_st <- function(parsed, dr_call, data, fam, chains, iter, warmup,
+                          seed, cores, control, caller_env) {
+  if (!(fam$family %in% c("poisson", "gaussian"))) {
+    stop("supported families for deepRV_st: poisson, gaussian; got: ",
+         fam$family, call. = FALSE)
+  }
+  decoder <- dr_call$decoder
+  validate_decoder(decoder, source = "<deeprv_brm_st input>")
+  validate_prior_in_range(dr_call$ls_prior, decoder$ls_trained_range,
+                          decoder_label = decoder_label(decoder))
+
+  y <- eval(parsed$lhs, envir = data, enclos = caller_env)
+  X <- build_design_matrix(parsed$rhs, data)
+
+  stancode <- build_stancode_st(decoder, dr_call$ls_prior,
+                                dr_call$sigma_t_prior, fam$family)
+  standata <- build_standata_st(decoder, dr_call, y, X, fam$family)
+
+  sampling_args <- list(
+    model_code = stancode,
+    data       = standata,
+    chains     = chains,
+    iter       = iter,
+    warmup     = warmup,
+    cores      = cores,
+    control    = control,
+    refresh    = 0
+  )
+  if (!is.null(seed)) sampling_args$seed <- seed
+  stanfit <- do.call(rstan::stan, sampling_args)
+
+  out <- list(
+    stanfit    = stanfit,
+    stancode   = stancode,
+    standata   = standata,
+    decoder    = decoder,
+    deepRV     = dr_call,
+    family     = fam,
+    X          = X,
+    by_mode    = "st",
+    ls_pooling = "complete"
+  )
+  class(out) <- c("deeprv_fit", "list")
+  out
 }
 
 decoder_label <- function(dr) {

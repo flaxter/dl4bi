@@ -34,6 +34,24 @@ posterior_eta_draws <- function(fit) {
     return(fixed + spatial)
   }
 
+  if (identical(by_mode, "st")) {
+    draws <- rstan::extract(fit$stanfit,
+                            pars = c("z", "ls", "sigma_t", "b"))
+    b <- as.matrix(draws$b)
+    fixed <- b %*% t(X)
+    time_idx <- as.integer(fit$standata$time_idx)
+    F_draws <- forward_st_batched(fit$decoder, draws$z, draws$ls,
+                                  draws$sigma_t)
+    # F_draws is (S, T, L); gather per observation by (time_idx, obs_idx).
+    S <- dim(F_draws)[1L]
+    N <- length(time_idx)
+    spatial <- matrix(0, nrow = S, ncol = N)
+    for (n in seq_len(N)) {
+      spatial[, n] <- F_draws[, time_idx[n], obs_idx[n]]
+    }
+    return(fixed + spatial)
+  }
+
   draws <- rstan::extract(fit$stanfit, pars = c("z", "ls", "b"))
   ls <- draws$ls            # (S,)
   b <- as.matrix(draws$b)   # (S, K)
@@ -86,6 +104,28 @@ forward_decode_batched <- function(decoder, z_draws, ls_draws) {
   pre_h <- sweep(x_aug %*% W1, 2L, b1, FUN = "+")
   h <- pmax(pre_h, 0)
   sweep(h %*% W2, 2L, b2, FUN = "+")             # (S, L)
+}
+
+# Space-time forward for the RW time prior. Given S draws of
+# z (S, T, L), ls (S,), and sigma_t (S,), returns F (S, T, L) where
+# eps[s, t] = decode(z[s, t], ls[s]) and
+# F[s, t] = F[s, t-1] + sigma_t[s] * eps[s, t] with F[s, 0] = 0.
+forward_st_batched <- function(decoder, z_draws, ls_draws, sigma_t_draws) {
+  S <- dim(z_draws)[1L]
+  T_full <- dim(z_draws)[2L]
+  L <- dim(z_draws)[3L]
+  F_draws <- array(0, dim = c(S, T_full, L))
+  prev <- matrix(0, nrow = S, ncol = L)
+  for (t in seq_len(T_full)) {
+    eps_t <- forward_decode_batched(decoder, z_draws[, t, ], ls_draws)
+    # Row-wise scale: sigma_t_draws[s] multiplies eps_t[s, ]. Use sweep
+    # so the broadcast doesn't depend on whether sigma_t_draws carries
+    # a dim attribute from rstan::extract.
+    F_t <- prev + sweep(eps_t, 1L, sigma_t_draws, FUN = "*")
+    F_draws[, t, ] <- F_t
+    prev <- F_t
+  }
+  F_draws
 }
 
 # Kronecker forward for S draws of z (S, N_side, N_side), ls_x (S,),

@@ -804,7 +804,24 @@ Recommended order for the v0.1 build:
    2D data frame `(grid_index, s_x, s_y, estimate, lower, upper)` and
    the `plot()` method draws a viridis heatmap with white contour
    overlay. `by` is rejected with Kron decoders in v0.1.
-10. **`deepRV_st(...)` + RW/AR1/decoder time priors** — ~1 week.
+10. **`deepRV_st(...)` + RW/AR1/decoder time priors** —
+    **RW + 1D space + Poisson/Gaussian done (MVP).** `R/formula.R`:
+    `deepRV_st(decoder, decoder_time, obs_idx, time_idx, ls_prior,
+    sigma_t_prior)` is a marker that yields a `deepRV_st_call`;
+    `parse_deeprv_formula()` recognises both `deepRV` and `deepRV_st`.
+    `R/stancode.R::build_stancode_st()` emits a program with
+    `matrix[T, L] z`, computes per-time `eps[t] = decode(z[t], ls)`,
+    then accumulates `F[t] = F[t-1] + sigma_t * eps[t]`. Likelihood
+    gathers `F[time_idx[n], obs_idx[n]]` per observation.
+    `R/priors.R::prior_exp(rate)` is the new exponential-prior helper;
+    the default `sigma_t_prior` is `prior_exp(1)`.
+    `R/post_processing.R::forward_st_batched()` is the matching
+    R-side batched forward; test confirms < 1e-3 match against
+    Stan's `F` (S, T, L). `deeprv_brm()` dispatches via a separate
+    `deeprv_brm_st()` helper. Remaining work: `decoder_time = "ar1"`,
+    `decoder_time = <1D decoder>`, Kronecker spatial decoders,
+    `by` / `gr` combined with space-time. Each is a follow-up commit
+    rather than a v0.1 blocker.
 11. **Vignettes, polishing, CRAN submission prep.** ~1 week.
 
 **Total v0.1 estimate: ~6 person-weeks of engineering + GPU/CPU time for

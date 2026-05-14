@@ -43,6 +43,71 @@ print.deepRV_call <- function(x, ...) {
   invisible(x)
 }
 
+#' Mark a deepRV space-time term in a [deeprv_brm()] formula
+#'
+#' Like [deepRV()] but with an additional time axis. Currently MVP scope:
+#' 1D `unit_interval` decoder for space + a random-walk time prior. The
+#' design doc allows `decoder_time` to also be `"ar1"` or a 1D decoder;
+#' those will land in a follow-up.
+#'
+#' @param decoder A 1D `deepRV_decoder` for the spatial axis (from
+#'   [load_deeprv()]).
+#' @param decoder_time One of:
+#'   \itemize{
+#'     \item `"rw"`: random walk in time. Each time slice's spatial
+#'       field is added to the previous, scaled by `sigma_t`.
+#'   }
+#' @param obs_idx Integer vector of length `nrow(data)` mapping each
+#'   observation to its 1-based spatial grid index.
+#' @param time_idx Integer vector of length `nrow(data)` mapping each
+#'   observation to its 1-based time index.
+#' @param ls_prior A `deepRV_prior` for the spatial length-scale.
+#' @param sigma_t_prior A `deepRV_prior` for the random-walk innovation
+#'   scale. Default `prior_exp(1)`.
+#' @export
+deepRV_st <- function(decoder, decoder_time = "rw",
+                      obs_idx, time_idx, ls_prior,
+                      sigma_t_prior = prior_exp(1)) {
+  if (!inherits(decoder, "deepRV_decoder")) {
+    stop("`decoder` must be a deepRV_decoder from load_deeprv()",
+         call. = FALSE)
+  }
+  if (inherits(decoder, "deepRV_decoder_kron")) {
+    stop("deepRV_st(): Kronecker spatial decoders aren't wired up in v0.1 ",
+         "(spatial side must be a 1D unit_interval decoder for now).",
+         call. = FALSE)
+  }
+  if (!identical(decoder_time, "rw")) {
+    stop("deepRV_st(): only decoder_time = \"rw\" is supported in v0.1. ",
+         "ar1 and decoder-based time priors are reserved for a follow-up.",
+         call. = FALSE)
+  }
+  call_args <- list(
+    decoder       = decoder,
+    decoder_time  = decoder_time,
+    obs_idx       = obs_idx,
+    time_idx      = time_idx,
+    ls_prior      = ls_prior,
+    sigma_t_prior = sigma_t_prior
+  )
+  class(call_args) <- c("deepRV_st_call", "list")
+  call_args
+}
+
+#' @export
+print.deepRV_st_call <- function(x, ...) {
+  cat("<deepRV_st_call>\n")
+  cat(sprintf("  decoder       : %s grid=%d kernel=%s\n",
+              x$decoder$domain, x$decoder$grid_size, x$decoder$kernel))
+  cat(sprintf("  decoder_time  : %s\n", x$decoder_time))
+  cat(sprintf("  obs_idx       : length %d\n", length(x$obs_idx)))
+  cat(sprintf("  time_idx      : length %d, T = %d\n",
+              length(x$time_idx), max(x$time_idx, na.rm = TRUE)))
+  cat("  ls_prior      : "); print(x$ls_prior)
+  cat("  sigma_t_prior : "); print(x$sigma_t_prior)
+  invisible(x)
+}
+
 # Walk the RHS of a formula collecting every deepRV(...) call. Returns
 # a list with two slots:
 #   $deepRV : a list of evaluated deepRV_call objects (one per term)
@@ -63,8 +128,8 @@ parse_deeprv_formula <- function(formula, data, envir = parent.frame()) {
   eval_env <- list2env(as.list(data), parent = envir)
   collected <- list()
 
-  # Recursive walk: split by `+` (and `-`), evaluating deepRV() calls.
-  # Everything that isn't a deepRV() call is retained in the residual RHS.
+  # Recursive walk: split by `+` (and `-`), evaluating deepRV() / deepRV_st()
+  # calls. Everything else is retained in the residual RHS.
   walk <- function(e) {
     if (is.call(e) && length(e) >= 1L) {
       head <- e[[1L]]
@@ -75,6 +140,17 @@ parse_deeprv_formula <- function(formula, data, envir = parent.frame()) {
         spec <- eval(call_eval, envir = eval_env)
         if (!inherits(spec, "deepRV_call")) {
           stop("`deepRV(...)` did not produce a deepRV_call object",
+               call. = FALSE)
+        }
+        collected[[length(collected) + 1L]] <<- spec
+        return(NULL)
+      }
+      if (is.name(head) && identical(as.character(head), "deepRV_st")) {
+        call_eval <- e
+        call_eval[[1L]] <- quote(brms.deeprv::deepRV_st)
+        spec <- eval(call_eval, envir = eval_env)
+        if (!inherits(spec, "deepRV_st_call")) {
+          stop("`deepRV_st(...)` did not produce a deepRV_st_call object",
                call. = FALSE)
         }
         collected[[length(collected) + 1L]] <<- spec
@@ -92,14 +168,14 @@ parse_deeprv_formula <- function(formula, data, envir = parent.frame()) {
   }
   residual <- walk(rhs)
   if (length(collected) == 0L) {
-    stop("formula has no deepRV() term. Use brms::brm() directly for ",
-         "non-deepRV models.", call. = FALSE)
+    stop("formula has no deepRV() or deepRV_st() term. Use brms::brm() ",
+         "directly for non-deepRV models.", call. = FALSE)
   }
   if (length(collected) > 1L) {
-    stop(sprintf("multiple deepRV() terms in formula (%d); v0.1 supports ",
+    stop(sprintf("multiple deepRV / deepRV_st terms in formula (%d); ",
                  length(collected)),
-         "exactly one. Stacking multiple decoders is a planned v0.2 feature.",
-         call. = FALSE)
+         "v0.1 supports exactly one. Stacking multiple decoders is a ",
+         "planned v0.2 feature.", call. = FALSE)
   }
   list(deepRV = collected, rhs = residual, lhs = formula[[2L]])
 }
