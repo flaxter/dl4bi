@@ -65,6 +65,20 @@ def main():
             "out": np.asarray(out[0]).tolist(),
         })
 
+    # Inference fixture: synthesize Poisson observations from the same decoder
+    # at a chosen truth, so HMC has something self-consistent to recover.
+    # Matches the numpyro model in deep_rv_example.py:114 (Poisson(exp(beta + mu))
+    # with a binary obs mask).
+    rng_inf = random.key(123)
+    rng_z, rng_ls, rng_beta, rng_mask, rng_y = random.split(rng_inf, 5)
+    z_true = random.normal(rng_z, (1, L))
+    ls_true = random.uniform(rng_ls, (), minval=1.0, maxval=100.0)
+    beta_true = random.normal(rng_beta) * 1.0  # N(0, 1)
+    mu_true = decode(z_true, jnp.array([ls_true]))[0]
+    rate = jnp.exp(beta_true + mu_true)
+    y_obs = jax.random.poisson(rng_y, rate).astype(int)
+    mask = (random.uniform(rng_mask, (L,)) < 0.7).astype(int)
+
     artifact = {
         "arch": "MLPDeepRV",
         "L": L,
@@ -74,9 +88,20 @@ def main():
         "input_layout": "cond_as_locs",  # concat([z, cond])
         "layers": layers,
         "test_cases": cases,
+        "inference": {
+            "y": np.asarray(y_obs).tolist(),
+            "obs_mask": np.asarray(mask).tolist(),
+            "truth": {
+                "z": np.asarray(z_true[0]).tolist(),
+                "ls": float(ls_true),
+                "beta": float(beta_true),
+            },
+        },
     }
     OUT.write_text(json.dumps(artifact, indent=2))
     print(f"Wrote {OUT} ({OUT.stat().st_size} bytes, {len(cases)} test cases, L={L})")
+    print(f"  inference fixture: ls*={float(ls_true):.3f}, beta*={float(beta_true):+.3f}, "
+          f"n_obs={int(mask.sum())}/{L}")
 
 
 if __name__ == "__main__":

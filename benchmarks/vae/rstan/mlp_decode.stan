@@ -35,13 +35,36 @@ data {
   vector[hidden]              b1;
   matrix[hidden,         L]   W2;
   vector[L]                   b2;
+  // Inference inputs (mirror deep_rv_example.py:114):
+  //   y_i ~ Poisson(exp(beta + mu_i)) for i with obs_mask[i] == 1
+  array[L] int<lower=0> y;
+  array[L] int<lower=0, upper=1> obs_mask;
+}
+
+transformed data {
+  // Pack observed indices once so the likelihood is vectorized.
+  int n_obs = 0;
+  for (i in 1:L) n_obs += obs_mask[i];
+  array[n_obs] int obs_idx;
+  array[n_obs] int y_obs;
+  {
+    int k = 1;
+    for (i in 1:L) {
+      if (obs_mask[i] == 1) {
+        obs_idx[k] = i;
+        y_obs[k] = y[i];
+        k += 1;
+      }
+    }
+  }
 }
 
 parameters {
   // Match the canonical inference model in deep_rv_example.py:
-  //   z ~ N(0, I_L),  ls ~ Uniform(1, 100) (use the trained prior range)
+  //   z ~ N(0, I_L),  ls ~ Uniform(1, 100), beta ~ N(0, 1)
   vector[L] z;
   real<lower=1, upper=100> ls;
+  real beta;
 }
 
 transformed parameters {
@@ -52,5 +75,7 @@ transformed parameters {
 
 model {
   z ~ std_normal();
-  // ls has implicit Uniform(1,100) prior from its bounds.
+  beta ~ std_normal();
+  // ls has implicit Uniform(1, 100) prior from its bounds.
+  target += poisson_log_lpmf(y_obs | beta + mu[obs_idx]);
 }
