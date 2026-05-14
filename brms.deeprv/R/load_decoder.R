@@ -54,9 +54,9 @@ read_manifest <- function(path = manifest_path()) {
 #' Decoder weights are MLP outputs of `MLPDeepRV(dims = [L, L])` trained
 #' to emulate `chol(K_ls) %*% z` for length-scale `ls` drawn from the
 #' decoder's `ls_trained_range`. Inference outside that range is not
-#' supported — see DESIGN.md section5.
+#' supported - see DESIGN.md section 5.
 #'
-#' @param domain Coordinate domain — `"unit_interval"` is the only
+#' @param domain Coordinate domain - `"unit_interval"` is the only
 #'   value supported as a 1D decoder in v0.1. Use [load_deeprv_kron()]
 #'   for `unit_square`.
 #' @param grid_size Number of grid points. Must equal one of the sizes
@@ -65,7 +65,7 @@ read_manifest <- function(path = manifest_path()) {
 #'   `"matern_5_2"`, or `"rbf"`.
 #'
 #' @return A list with class `"deepRV_decoder"` and the schema of
-#'   DESIGN.md section2.2. The relevant accessors for downstream use are
+#'   DESIGN.md section 2.2. The relevant accessors for downstream use are
 #'   `$grid_coords` (the exact training grid), `$ls_trained_range`, and
 #'   `$weights`.
 #'
@@ -133,7 +133,7 @@ describe_manifest <- function(m) {
   lines <- character(0)
   for (fp in names(m$decoders)) {
     fname <- m$decoders[[fp]]
-    # Filenames have the canonical form <domain>_<grid_size>_<kernel>.rds —
+    # Filenames have the canonical form <domain>_<grid_size>_<kernel>.rds -
     # parsing this avoids loading every .rds just to list options.
     stem <- sub("\\.rds$", "", fname)
     lines <- c(lines, sprintf("  %s  (%s)", stem, substr(fp, 1, 12)))
@@ -145,18 +145,18 @@ describe_manifest <- function(m) {
 #'
 #' Pairs two 1D `unit_interval` decoders (one along x, one along y).
 #' Sampling reduces to `F = L_x %*% Z %*% t(L_y)` at fit time. Only
-#' axis-wise separable kernels are valid here — Matérn / RBF are
+#' axis-wise separable kernels are valid here - Matern / RBF are
 #' interpreted as separable in v0.1, not as isotropic 2D kernels. See
-#' DESIGN.md section2.5.
+#' DESIGN.md section 2.5.
 #'
 #' @param domain Must be `"unit_square"`.
 #' @param grid_side Number of points per axis; the full grid has
 #'   `grid_side^2` cells.
 #' @param kernel One of `"matern_1_2"`, `"matern_3_2"`, `"matern_5_2"`,
-#'   `"rbf"` — applied identically along both axes.
+#'   `"rbf"` - applied identically along both axes.
 #'
 #' @return A list with class `c("deepRV_decoder_kron", "deepRV_decoder")`
-#'   and the schema of DESIGN.md section2.5. `$x_decoder` and `$y_decoder`
+#'   and the schema of DESIGN.md section 2.5. `$x_decoder` and `$y_decoder`
 #'   hold the 1D decoders; `$grid_coords` is the full 2D grid as a
 #'   `grid_side^2 x 2` matrix.
 #'
@@ -173,7 +173,7 @@ load_deeprv_kron <- function(domain, grid_side, kernel) {
                  kernel, paste(SUPPORTED_KERNELS, collapse = ", ")),
          call. = FALSE)
   }
-  # Both axes share the same 1D decoder — DESIGN.md section2.5 requires that
+  # Both axes share the same 1D decoder - DESIGN.md section 2.5 requires that
   # the kernel is identical along x and y in v0.1.
   axis_dec <- load_deeprv("unit_interval", grid_size = grid_side,
                           kernel = kernel)

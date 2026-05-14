@@ -3,7 +3,7 @@
 #' Must produce byte-identical output to `fingerprint()` in
 #' `benchmarks/vae/rstan/train_decoders.py` and to `deeprv_fingerprint()`
 #' in `benchmarks/vae/rstan/pack_decoders.R`. Floats are formatted with
-#' `%.8f` — see DESIGN.md section4.8 for why nothing else round-trips between
+#' `%.8f` - see DESIGN.md section 4.8 for why nothing else round-trips between
 #' Python and R.
 #'
 #' @keywords internal
@@ -28,7 +28,7 @@ SUPPORTED_DOMAINS <- c("unit_interval", "unit_square")
 SUPPORTED_KERNELS <- c("matern_1_2", "matern_3_2", "matern_5_2", "rbf")
 
 #' Validate that a loaded decoder list has the canonical structure of
-#' DESIGN.md section2.2 and that its fingerprint matches what we'd recompute
+#' DESIGN.md section 2.2 and that its fingerprint matches what we'd recompute
 #' from the source fields. Errors loudly on any mismatch.
 #'
 #' @keywords internal
@@ -123,7 +123,7 @@ validate_decoder <- function(dr, source = "<unknown>") {
          sprintf("stored=%s, recomputed=%s. ",
                  dr$fingerprint, computed),
          "The .rds was probably built with an out-of-date pack_decoders.R ",
-         "or a different float-formatting convention. See DESIGN.md section4.8.",
+         "or a different float-formatting convention. See DESIGN.md section 4.8.",
          call. = FALSE)
   }
   invisible(TRUE)

@@ -742,7 +742,21 @@ Recommended order for the v0.1 build:
    is now "extend the parity test to cover every decoder in
    `configs/v0.1.yaml` once the catalog is trained."
 5. **`deepRV()` formula term + `deeprv_brm()` wrapper** — basic spatial only
-   (no `by`, no `gr`). Reuses `run_hmc.R` patterns. ~1 week.
+   (no `by`, no `gr`). Reuses `run_hmc.R` patterns. **MVP done.**
+   `R/formula.R`: `deepRV(...)` is a marker that captures its arguments;
+   `parse_deeprv_formula()` walks the RHS, extracting a single deepRV
+   term and returning the residual. `R/priors.R`: `prior_uniform(lo, hi)`
+   + `validate_prior_in_range()` (the section 2.3.3 "prior must fit the
+   trained range" check). `R/stancode.R`: builds a complete Stan
+   program inlining `inst/stan/decode_mlp.stan`'s functions block plus
+   data/parameters/transformed parameters/model blocks for the Poisson
+   MVP. `R/fit.R`: `deeprv_brm()` parses, validates, assembles standata,
+   compiles, and samples via `rstan::stan()`. MVP gate: one deepRV term,
+   intercept-only, Poisson, `prior_uniform` on ls. End-to-end test
+   fits a synthetic Poisson L=10 fixture in ~50 s (2 chains x 400 iter
+   on 2 cores) without errors or divergences. Per-feature gates in
+   `deeprv_brm()` reject `by`/`gr`/non-Poisson with clear messages so
+   the next agent knows exactly where to lift restrictions.
 6. **`posterior_predict.deepRV`, `conditional_effects.deepRV`** — minimal
    versions for the basic spatial case. ~3 days.
 7. **`by = factor`, `by = numeric`, `ls_pooling`** — ~1 week.
@@ -760,10 +774,9 @@ the catalog.**
 ## 9 · Handoff bundle
 
 Branch: `claude/deeprv-rstan-integration-VDtiw`.
-Steps 1, 2, and the install-time forward-match (the part of step 4
-gated on the smoke catalog) are done. Next is §8 step 3
-(coordinate helpers) and/or §8 step 5 (`deepRV()` formula term +
-`deeprv_brm()` wrapper).
+Steps 1, 2, 4, and the MVP of step 5 are done. Next is widening
+step 5 (covariates, `by`, `gr`, families other than Poisson) and/or
+step 3 (coordinate helpers) and/or step 6 (post-processing).
 
 ### What's in place
 
@@ -776,11 +789,18 @@ gated on the smoke catalog) are done. Next is §8 step 3
 | `brms.deeprv/R/utils.R` | `deeprv_fingerprint()`, `validate_decoder()`. **The Python and R fingerprint formulas live here and in `train_decoders.py` + `pack_decoders.R` — keep them in lock-step.** |
 | `brms.deeprv/R/load_decoder.R` | `load_deeprv()`, `load_deeprv_kron()`, S3 `print` methods. Decoder dir overridable via `options(brms.deeprv.decoder_dir)` or `BRMS_DEEPRV_DECODER_DIR` env var. |
 | `brms.deeprv/R/zzz.R` | `.onLoad`: env-var → option bridge |
+| `brms.deeprv/R/priors.R` | `prior_uniform()`, `validate_prior_in_range()`. v0.2 extension point for `prior_truncated_normal()` and friends. |
+| `brms.deeprv/R/formula.R` | `deepRV(...)` marker + `parse_deeprv_formula()` walker. |
+| `brms.deeprv/R/stancode.R` | `build_stancode()`, `build_standata()`. Inlines `inst/stan/decode_mlp.stan`'s functions block. **MVP only emits the Poisson/intercept/uniform-ls path** — every other branch is a `stop()` in `deeprv_brm()`. |
+| `brms.deeprv/R/fit.R` | `deeprv_brm()` glue and the `deeprv_fit` S3 class. |
 | `brms.deeprv/inst/extdata/decoders/` | Smoke catalog seed (2 unit_interval_10 decoders + manifest.json). Replace with the v0.1 catalog before release. |
 | `brms.deeprv/inst/stan/decode_mlp.stan` | The shipped `decode` function (Stan, no model block). Bumping this REQUIRES bumping `arch_version` in the catalog. |
 | `brms.deeprv/man/*.Rd` | Hand-written; switch to roxygen2 generation once that dep is installed. |
 | `brms.deeprv/tests/testthat/test-load.R` | 27 assertions: manifest hit/miss, kernel/domain validation, fingerprint tamper detection, Python ↔ R fingerprint byte-equality. |
 | `brms.deeprv/tests/testthat/test-forward.R` | rstan-vs-JAX forward parity across every shipped decoder. 15 assertions, ~24 s including Stan compile. |
+| `brms.deeprv/tests/testthat/test-priors.R` | 10 assertions: `prior_uniform()` bounds checking + trained-range validation. |
+| `brms.deeprv/tests/testthat/test-formula.R` | 14 assertions: parser pulls a clean spec from `y ~ deepRV(...)`, retains other RHS terms as residual, errors on zero/multiple deepRV terms. |
+| `brms.deeprv/tests/testthat/test-fit.R` | 12 assertions: end-to-end Poisson fit on the smoke fixture, ~50 s sampling, no divergences. Skipped under `NOT_CRAN` unset. |
 
 ### How to verify
 
@@ -814,22 +834,34 @@ on Ubuntu) before anything else.
 1. **Decide whether to train the v0.1 catalog now** (`configs/v0.1.yaml`,
    ~1 CPU-week unattended) or keep using smoke fixtures. The fingerprint
    pipeline is locked, so the package will accept the real catalog the
-   moment it's copied into `inst/extdata/decoders/`.
-2. **§8 step 3 — coordinate helpers** in `R/coords.R`:
+   moment it's copied into `inst/extdata/decoders/`. Until then, the
+   end-to-end test in `test-fit.R` only confirms wiring, not recovery —
+   the run_hmc.R-style "90% CI covers truth" test waits for real
+   decoders.
+2. **Widen step 5 by lifting MVP gates one at a time.** Each gate is a
+   `stop()` in `deeprv_brm()` (search for "MVP:"); lifting it means
+   editing both that check and `build_stancode()`/`build_standata()`.
+   Suggested order, smallest first:
+   - **Covariates on the RHS.** Add a `model.matrix(parsed$rhs, data)`
+     call, push `X` and `K` into standata, add `vector[K] b; beta0 +
+     X * b` to the Stan program. Brms-style `prior(normal(0,1),
+     class = "b")` priors get translated to Stan prior statements.
+   - **Other families.** `gaussian()` and `bernoulli()` are obvious
+     next targets; family branching lives entirely in
+     `build_stancode()`.
+   - **`by = factor` and `by = numeric`.** The Stan side changes
+     shape (matrix `z`, vector `ls`); see section 2.4.2 / 2.4.3.
+   - **`gr = TRUE`.** Pure data-side change; see section 2.4.4.
+3. **§8 step 3 — coordinate helpers** in `R/coords.R`:
    `rescale_to_unit_interval()`, `rescale_to_unit_square()`,
    `which_grid_points()`, `snap_to_grid()`. Small, testable, no Stan
-   involvement.
-3. **§8 step 5 — the `deepRV()` formula term and `deeprv_brm()` wrapper.**
-   The reference shape is `benchmarks/vae/rstan/run_hmc.R`: that's the
-   prototype HMC call that produced the 42 s baseline. The package
-   version should:
-   - Build `stanvars` from a loaded decoder (weights as `data`, the
-     `decode` function in the `functions` block — `inst/stan/decode_mlp.stan`
-     is meant to be `paste()`'d in via `stanvar(block = "functions")`).
-   - Parse `deepRV(...)` terms out of the formula and rewrite to a
-     brms-acceptable form (see §2.3.5).
-   - Call `brms::brm()` with everything else passed through.
-   Start with the bare spatial case (no `by`, no `gr`, no Kronecker).
+   involvement. Can land in parallel with step 5 widening.
+4. **§8 step 6 — `posterior_predict.deepRV`, `conditional_effects.deepRV`.**
+   The `deeprv_fit` object already carries the stanfit and decoder;
+   adding these S3 methods is mostly a matter of extracting `z`/`ls`
+   draws, running them through `decode_mlp.stan` (R-side or via
+   `expose_stan_functions()`), and shaping the result like brms's
+   existing output.
 
 ### Open questions to batch back to the user
 

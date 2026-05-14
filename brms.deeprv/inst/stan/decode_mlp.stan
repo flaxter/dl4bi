@@ -11,7 +11,7 @@
 //   - downstream packages can inline the same source for prediction
 //
 // Bumping the body of this function REQUIRES bumping arch_version in
-// the catalog config — otherwise old .rds artifacts will be treated as
+// the catalog config - otherwise old .rds artifacts will be treated as
 // compatible by load_deeprv() despite a numerically different forward.
 
 functions {
