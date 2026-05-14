@@ -117,3 +117,51 @@ fits hit `auto_write = TRUE` cache after the first L).
   iter budget; deeprv had 0 divergences and Rhat below 1.005
   throughout. Likely the RW(0, I_L) reparameterisation through the
   decoder mixes more easily than the direct GP for short chains.
+
+## Disentanglement at L = 100
+
+The headline 0.056 eta RMSE between methods at L = 100 has three
+sources: (i) the decoder is a finite-capacity approximation to
+`chol(K(ℓ)) · z`, (ii) the two methods used different priors on
+length-scale and GP amplitude, (iii) Monte-Carlo noise at 1000
+iter / 2 chains. To pin down each, I ran two follow-up scenarios:
+
+- **B**: align priors (`prior(uniform(0.05, 0.5), class = "lscale",
+  coef = "gps")` on the brms side, matching deeprv's prior_uniform)
+  and bump iter to 4000.
+- **C**: same as B + swap in a high-res decoder for L = 100 RBF —
+  same arch, trained 10× longer (1M steps), final MSE 0.0028 vs the
+  v1.0.0 catalog's ~0.03.
+
+| Scenario | brms wall | deeprv wall | speedup | eta RMSE (drv vs brms) | brms divs |
+|---|---|---|---|---|---|
+| A baseline (1k iter, brms-default priors) | 159.7 s | 54.7 s | 2.92× | 0.056 | 0 |
+| B aligned priors + 4k iter, v1.0.0 decoder | 279.2 s | 77.3 s | 3.61× | 0.048 | 1294 |
+| C aligned priors + 4k iter, **highres decoder** | 281.3 s | 79.2 s | 3.55× | **0.027** | 1294 |
+
+**Decomposition of the 0.056 baseline RMSE:**
+
+- A → B: dropping 0.008 (~14%) — that's prior-mismatch + MC noise
+  contribution.
+- B → C: dropping 0.021 (~44%) — that's purely the decoder
+  approximation improvement (same priors, same iter, same data, same
+  brms config).
+
+**Conclusion: the decoder approximation is the dominant residual
+source of disagreement.** Training the L = 100 RBF decoder for 10×
+longer roughly halves the eta RMSE. Pushing further (a properly
+converged decoder hitting MSE 1e-4 or below) would close most of the
+remaining gap; the prior-mismatch contribution is small.
+
+**Caveat on the aligned-prior brms run.** `prior(uniform(0.05, 0.5),
+class = "lscale", coef = "gps")` produces a brms model whose sampler
+hits ~1300 divergences across both chains. Rhat stays ≈ 1.01 so the
+posterior mean is still recoverable, but it tells me the truncated
+uniform on the GP length-scale fights brms's default reparameterisation.
+For the scaling extension below I use the baseline (brms-default
+priors) config so brms is healthy.
+
+Reproduce:
+- B: `Rscript benchmarks/vae/rstan/bench_brms_gp_vs_deeprv.R --grids=100 --iter=4000 --align-priors`
+- C: train a 1M-step L=100 RBF decoder into a separate dir; pack with
+  `pack_decoders.R`; then add `--decoder-dir=<that path>`.

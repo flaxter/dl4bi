@@ -27,15 +27,28 @@ rstan_options(auto_write = TRUE)
 # ---- arguments -------------------------------------------------------------
 args <- commandArgs(trailingOnly = TRUE)
 write_md <- "--write" %in% args
+align_priors <- "--align-priors" %in% args
 grids <- if (any(grepl("--grids=", args))) {
   spec <- sub("--grids=", "", args[grepl("--grids=", args)])
   as.integer(strsplit(spec, ",", fixed = TRUE)[[1L]])
 } else c(20L, 50L)
-iter   <- 1000L
-warmup <- 500L
+iter <- if (any(grepl("--iter=", args))) {
+  as.integer(sub("--iter=", "", args[grepl("--iter=", args)]))
+} else 1000L
+warmup <- floor(iter / 2)
+# Optional override of the deeprv decoder dir, e.g. for swapping in a
+# longer-trained decoder for the same (grid_size, kernel).
+if (any(grepl("--decoder-dir=", args))) {
+  d <- sub("--decoder-dir=", "", args[grepl("--decoder-dir=", args)])
+  options(brms.deeprv.decoder_dir = d)
+  cat(sprintf("[deeprv decoder dir overridden to %s]\n", d))
+}
 ls_lo  <- 0.05
 ls_hi  <- 0.5
 seed   <- 1L
+
+cat(sprintf("[bench config] grids=%s iter=%d (warmup %d) align_priors=%s\n",
+            paste(grids, collapse = ","), iter, warmup, align_priors))
 
 # ---- synthetic fixture per grid -------------------------------------------
 make_fixture <- function(L, ls_true = 0.2, beta0_true = 0.0, seed = 1L) {
@@ -52,18 +65,30 @@ make_fixture <- function(L, ls_true = 0.2, beta0_true = 0.0, seed = 1L) {
 }
 
 # ---- fit via brms::gp() ----------------------------------------------------
-# We deliberately use brms's default priors for lscale and sdgp here.
-# brms picks per-coefficient defaults that can't be easily overridden
-# without knowing the exact internal coef name; a global `prior(class =
-# "lscale")` silently fails to attach. For this benchmark the main
-# axes (wall time, posterior shape on eta) are insensitive to the
-# specific prior choice as long as both fits are stable.
-fit_brms_gp <- function(df, iter, warmup, seed) {
+# When align_priors = TRUE, attach a uniform(0.05, 0.5) prior to brms's
+# `lscale` for the gp(s) term and fix sdgp = 1 via prior(constant(1))
+# to match the deeprv side. coef="gps" is the brms-internal name for
+# `gp(s, ...)`; we discovered it via brms::default_prior().
+fit_brms_gp <- function(df, iter, warmup, seed, align_priors = FALSE) {
+  brms_prior <- NULL
+  if (align_priors) {
+    # brms refuses `coef` + `lb`/`ub` together; the uniform() density
+    # is -Inf outside its support, so the posterior is bounded anyway
+    # even with the default parameter bounds of <lower=0>.
+    # We don't fix sdgp at 1 - brms generates Stan that assigns a
+    # vector[Kgp_1] which conflicts with `constant(1)` being scalar int.
+    # Instead, with sigma_gp = 1 in the truth and an informative
+    # likelihood, brms's default student_t(3, 0, 2.5) prior on sdgp
+    # will concentrate the posterior near 1.
+    brms_prior <- brms::prior_string(sprintf("uniform(%g, %g)", ls_lo, ls_hi),
+                                     class = "lscale", coef = "gps")
+  }
   t0 <- Sys.time()
   fit <- brms::brm(
     y ~ gp(s, cov = "exp_quad", scale = FALSE),
     data    = df,
     family  = poisson(),
+    prior   = brms_prior,
     chains  = 2L,
     iter    = iter,
     warmup  = warmup,
@@ -117,7 +142,7 @@ for (L in grids) {
   df <- make_fixture(L, seed = seed)
 
   cat(sprintf("  fitting brms::gp() ...\n"))
-  r_brms <- fit_brms_gp(df, iter, warmup, seed)
+  r_brms <- fit_brms_gp(df, iter, warmup, seed, align_priors = align_priors)
   # posterior_linpred returns (S, N) draws of eta on the link scale.
   brms_eta <- brms::posterior_linpred(r_brms$fit)
   brms_post_mean <- colMeans(brms_eta)
