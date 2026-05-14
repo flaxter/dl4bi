@@ -841,7 +841,7 @@ Files in `brms.deeprv/`:
 | `R/post_processing.R` | `posterior_eta_draws()`, `posterior_(predict\|epred).deeprv_fit`, `forward_decode_batched()`. Pure R batched forward through the decoder. |
 | `R/conditional_effects.R` | `conditional_effects()` (local generic), `.deeprv_fit` method, `plot.deeprv_conditional_effects`. |
 | `R/coords.R` | `rescale_to_unit_(interval\|square)`, `which_grid_points()`, `snap_to_grid()`. |
-| `inst/extdata/decoders/` | Smoke catalog seed (2 unit_interval_10 decoders). Replace with full v0.1 catalog before release. |
+| `inst/extdata/decoders/` | **Full v0.1 catalog: 32 decoders + manifest.json (~46 MB).** All 8 grid sizes (5, 10, 20, 50, 100, 200, 500, 1000) x 4 kernels (matern_1_2, matern_3_2, matern_5_2, rbf), 100k training steps each. Trained 2026-05-14 on clpc35 (RTX 5000 Ada) in ~30 minutes wall. JAX/Stan forward parity verified for every decoder (max diff < 1e-5 across all 32). |
 | `inst/stan/decode_mlp.stan` | The shipped `decode` function. Bumping it REQUIRES bumping `arch_version`. |
 | `man/*.Rd` | Hand-written; switch to roxygen2 generation once that dep is installed. |
 | `tests/testthat/` | 8 files / ~146 assertions: load (27), forward (15), priors (10), formula (14), coords (18), fit (23), posterior (13), conditional-effects (12), svc (5), by-factor (18). Heavy tests (Stan compile) are skipped under `NOT_CRAN` unset; full suite ~5 min. |

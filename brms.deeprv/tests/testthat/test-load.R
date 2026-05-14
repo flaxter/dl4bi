@@ -74,16 +74,16 @@ test_that("print methods don't error", {
   expect_output(print(kron), "deepRV_decoder_kron")
 })
 
-test_that("fingerprint formula agrees with the Python convention (DESIGN.md §4.8)", {
-  # Hard-coded fingerprint for the smoke matern_1_2 decoder. If Python's
-  # train_decoders.py ever drifts from R's %.8f formatting, this will
-  # fail before any decoder loads.
+test_that("fingerprint formula agrees with the Python convention (DESIGN.md section 4.8)", {
+  # Hard-coded fingerprint for the v0.1 catalog's matern_1_2 L=10 decoder.
+  # If Python's train_decoders.py ever drifts from R's %.8f formatting,
+  # this will fail before any decoder loads.
   fp <- brms.deeprv:::deeprv_fingerprint(
-    "MLPDeepRV", "smoke.0", "unit_interval", 10L, "matern_1_2",
+    "MLPDeepRV", "1.0.0", "unit_interval", 10L, "matern_1_2",
     0.01, 1.0
   )
   expect_identical(
     fp,
-    "f3e712b95cfc86afddc8bd4dead7ec9e35004d836fc7dd9c186aa8ffc5bd5f19"
+    "28073c995f5848bd205b47591cb6c936c6b29296af1f26207d0d44f80029d2d2"
   )
 })
