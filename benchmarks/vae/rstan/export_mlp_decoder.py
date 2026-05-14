@@ -35,16 +35,17 @@ from dl4bi.vae import MLPDeepRV
 HERE = Path(__file__).parent
 OUT = HERE / "decoder_artifact.json"
 
-GRID_SIDE = 4                # 4x4 = 16 locations
+GRID_SIDE = 16               # 16x16 = 256 locations, matches deep_rv_example.py
 L = GRID_SIDE * GRID_SIDE
 COND_DIM = 1                 # just ls
 DIMS = [L, L]                # MLPDeepRV(dims=[L, L])
 LS_MIN, LS_MAX = 1.0, 100.0
-TRAIN_STEPS = 20_000
+TRAIN_STEPS = 100_000
 BATCH = 32
 LR = 1e-3
 JITTER = 5e-4
 N_MATCH_CASES = 4
+LOG_EVERY = 10_000
 
 
 def train_decoder(model, s, rng, steps=TRAIN_STEPS, batch=BATCH, lr=LR):
@@ -79,7 +80,7 @@ def train_decoder(model, s, rng, steps=TRAIN_STEPS, batch=BATCH, lr=LR):
     for i in range(steps):
         rng_loop, k = random.split(rng_loop)
         params, opt_state, loss = step(params, opt_state, k)
-        if (i + 1) % 2_500 == 0 or i == 0:
+        if (i + 1) % LOG_EVERY == 0 or i == 0:
             print(f"  step {i + 1:>6d}/{steps}: MSE = {float(loss):.4f}")
     print(f"  trained in {time.time() - t0:.1f}s, final MSE = {float(loss):.4f}")
     return params
