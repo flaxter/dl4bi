@@ -15,17 +15,24 @@
 // that — sgu_norm_scale / sgu_norm_bias are applied in BOTH blocks.
 
 functions {
-  // GELU(x) = x * Phi(x) — exact form used by jax.nn.gelu(approximate=False).
+  // jax.nn.gelu defaults to approximate=True (tanh form), and flax.linen.gelu
+  // re-exports it. Match the trained network exactly:
+  //   GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
   vector gelu_v(vector x) {
     int N = num_elements(x);
     vector[N] y;
-    for (i in 1:N) y[i] = x[i] * Phi(x[i]);
+    real c = sqrt(2.0 / pi());
+    for (i in 1:N) y[i] = 0.5 * x[i] * (1 + tanh(c * (x[i] + 0.044715 * x[i] ^ 3)));
     return y;
   }
   matrix gelu_m(matrix X) {
     int R = rows(X); int C = cols(X);
     matrix[R, C] Y;
-    for (i in 1:R) for (j in 1:C) Y[i, j] = X[i, j] * Phi(X[i, j]);
+    real c = sqrt(2.0 / pi());
+    for (i in 1:R) for (j in 1:C) {
+      real xij = X[i, j];
+      Y[i, j] = 0.5 * xij * (1 + tanh(c * (xij + 0.044715 * xij ^ 3)));
+    }
     return Y;
   }
 

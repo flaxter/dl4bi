@@ -6,14 +6,17 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.special import ndtr  # standard normal CDF, == Stan's Phi
 
 
 HERE = Path(__file__).parent
 
+# jax.nn.gelu defaults to approximate=True (tanh form), and flax.linen.gelu
+# re-exports it. The trained decoder uses this, so the port must match.
+_SQRT_2_OVER_PI = float(np.sqrt(2.0 / np.pi))
+
 
 def gelu(x):
-    return x * ndtr(x)
+    return 0.5 * x * (1.0 + np.tanh(_SQRT_2_OVER_PI * (x + 0.044715 * x ** 3)))
 
 
 def layer_norm(X, gamma, beta_, eps=1e-6):
