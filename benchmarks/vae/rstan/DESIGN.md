@@ -732,8 +732,13 @@ Recommended order for the v0.1 build:
    forward function), `man/*.Rd`. `R CMD check --no-manual` passes with
    zero notes/warnings/errors; 42 testthat assertions green including
    the forward-parity check from step 4 below.
-3. **Coordinate helpers** — `rescale_to_unit_interval()`, `which_grid_points()`,
-   `snap_to_grid()`. ~1 day.
+3. ~~**Coordinate helpers**~~ — **done.** `R/coords.R`:
+   `rescale_to_unit_interval()`, `rescale_to_unit_square()`,
+   `which_grid_points()` (errors loudly if any obs is off-grid by more
+   than `tol`, with a pointer at `snap_to_grid()`), and
+   `snap_to_grid()` (returns `list(coords, idx)` for the nearest grid
+   match). Pure R, no Stan involvement. 18 assertions in
+   `test-coords.R`.
 4. ~~**Forward-match tests**~~ — **done as part of step 2** —
    `tests/testthat/test-forward.R` loops over every shipped decoder,
    exposes `decode_mlp.stan::decode` via `rstan::expose_stan_functions`,
