@@ -19,7 +19,9 @@ as_mat <- function(x) do.call(rbind, lapply(x, unlist))
 W <- list()
 for (nm in names(art$weights)) {
   v <- art$weights[[nm]]
-  W[[nm]] <- if (is.list(v[[1]])) as_mat(v) else unlist(v)
+  # as.array() preserves the 1D shape so Stan reads length-1 vectors (e.g.
+  # head_b1) as vector[1] rather than coercing to a bare scalar.
+  W[[nm]] <- if (is.list(v[[1]])) as_mat(v) else as.array(unlist(v))
 }
 s_mat <- as_mat(art$s_mat)
 
