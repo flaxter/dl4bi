@@ -799,33 +799,42 @@ the catalog.**
 ## 9 · Handoff bundle
 
 Branch: `claude/deeprv-rstan-integration-VDtiw`.
-Steps 1, 2, 4, and the MVP of step 5 are done. Next is widening
-step 5 (covariates, `by`, `gr`, families other than Poisson) and/or
-step 3 (coordinate helpers) and/or step 6 (post-processing).
+
+Steps 1, 2, 3, 4, 5, 6 are done for v0.1; step 7 is done with
+`ls_pooling = "complete"`. Next is `ls_pooling != "complete"`, step 8
+(`gr = TRUE`), step 9 (Kronecker fit path), step 10 (space-time),
+step 11 (vignettes / CRAN prep), and training the v0.1 catalog.
 
 ### What's in place
 
+Files in `benchmarks/vae/rstan/`:
+
 | Path | Role |
 |---|---|
-| `benchmarks/vae/rstan/train_decoders.py` | Step 1 trainer |
-| `benchmarks/vae/rstan/pack_decoders.R` | Step 1 JSON → .rds packer |
-| `benchmarks/vae/rstan/verify_rds.R` | Step 1 install-time forward check |
-| `brms.deeprv/DESCRIPTION`, `NAMESPACE`, `LICENSE`, `.gitignore` | Step 2 package metadata |
-| `brms.deeprv/R/utils.R` | `deeprv_fingerprint()`, `validate_decoder()`. **The Python and R fingerprint formulas live here and in `train_decoders.py` + `pack_decoders.R` — keep them in lock-step.** |
-| `brms.deeprv/R/load_decoder.R` | `load_deeprv()`, `load_deeprv_kron()`, S3 `print` methods. Decoder dir overridable via `options(brms.deeprv.decoder_dir)` or `BRMS_DEEPRV_DECODER_DIR` env var. |
-| `brms.deeprv/R/zzz.R` | `.onLoad`: env-var → option bridge |
-| `brms.deeprv/R/priors.R` | `prior_uniform()`, `validate_prior_in_range()`. v0.2 extension point for `prior_truncated_normal()` and friends. |
-| `brms.deeprv/R/formula.R` | `deepRV(...)` marker + `parse_deeprv_formula()` walker. |
-| `brms.deeprv/R/stancode.R` | `build_stancode()`, `build_standata()`. Inlines `inst/stan/decode_mlp.stan`'s functions block. **MVP only emits the Poisson/intercept/uniform-ls path** — every other branch is a `stop()` in `deeprv_brm()`. |
-| `brms.deeprv/R/fit.R` | `deeprv_brm()` glue and the `deeprv_fit` S3 class. |
-| `brms.deeprv/inst/extdata/decoders/` | Smoke catalog seed (2 unit_interval_10 decoders + manifest.json). Replace with the v0.1 catalog before release. |
-| `brms.deeprv/inst/stan/decode_mlp.stan` | The shipped `decode` function (Stan, no model block). Bumping this REQUIRES bumping `arch_version` in the catalog. |
-| `brms.deeprv/man/*.Rd` | Hand-written; switch to roxygen2 generation once that dep is installed. |
-| `brms.deeprv/tests/testthat/test-load.R` | 27 assertions: manifest hit/miss, kernel/domain validation, fingerprint tamper detection, Python ↔ R fingerprint byte-equality. |
-| `brms.deeprv/tests/testthat/test-forward.R` | rstan-vs-JAX forward parity across every shipped decoder. 15 assertions, ~24 s including Stan compile. |
-| `brms.deeprv/tests/testthat/test-priors.R` | 10 assertions: `prior_uniform()` bounds checking + trained-range validation. |
-| `brms.deeprv/tests/testthat/test-formula.R` | 14 assertions: parser pulls a clean spec from `y ~ deepRV(...)`, retains other RHS terms as residual, errors on zero/multiple deepRV terms. |
-| `brms.deeprv/tests/testthat/test-fit.R` | 12 assertions: end-to-end Poisson fit on the smoke fixture, ~50 s sampling, no divergences. Skipped under `NOT_CRAN` unset. |
+| `train_decoders.py` | Step 1 trainer (YAML config -> per-decoder JSON) |
+| `pack_decoders.R` | Step 1 JSON -> canonical `.rds` packer |
+| `verify_rds.R` | Step 1 install-time forward check |
+| `configs/{v0.1,smoke}.yaml` | Catalog specs |
+| `mlp_decode.stan`, `check_match.R`, `run_hmc.R` | Original prototype - kept as the indep reference for forward parity |
+
+Files in `brms.deeprv/`:
+
+| Path | Role |
+|---|---|
+| `R/utils.R` | `deeprv_fingerprint()`, `validate_decoder()`. **Python and R fingerprint formulas live here, `train_decoders.py`, and `pack_decoders.R` - keep all three in lock-step.** |
+| `R/load_decoder.R` | `load_deeprv()`, `load_deeprv_kron()`. Decoder dir overridable via `options(brms.deeprv.decoder_dir)` or `BRMS_DEEPRV_DECODER_DIR`. |
+| `R/zzz.R` | `.onLoad`: env-var -> option bridge |
+| `R/priors.R` | `prior_uniform()`, `validate_prior_in_range()`. Extension point: `prior_truncated_normal()`. |
+| `R/formula.R` | `deepRV(...)` marker + `parse_deeprv_formula()` walker. |
+| `R/stancode.R` | `build_stancode()`, `build_standata()`, `family_spec()`. Handles `by_mode in {"none", "svc", "factor"}`, `family in {"poisson", "gaussian"}`. Inlines `inst/stan/decode_mlp.stan`. |
+| `R/fit.R` | `deeprv_brm()` glue, `classify_by()`, `build_design_matrix()`. |
+| `R/post_processing.R` | `posterior_eta_draws()`, `posterior_(predict\|epred).deeprv_fit`, `forward_decode_batched()`. Pure R batched forward through the decoder. |
+| `R/conditional_effects.R` | `conditional_effects()` (local generic), `.deeprv_fit` method, `plot.deeprv_conditional_effects`. |
+| `R/coords.R` | `rescale_to_unit_(interval\|square)`, `which_grid_points()`, `snap_to_grid()`. |
+| `inst/extdata/decoders/` | Smoke catalog seed (2 unit_interval_10 decoders). Replace with full v0.1 catalog before release. |
+| `inst/stan/decode_mlp.stan` | The shipped `decode` function. Bumping it REQUIRES bumping `arch_version`. |
+| `man/*.Rd` | Hand-written; switch to roxygen2 generation once that dep is installed. |
+| `tests/testthat/` | 8 files / ~146 assertions: load (27), forward (15), priors (10), formula (14), coords (18), fit (23), posterior (13), conditional-effects (12), svc (5), by-factor (18). Heavy tests (Stan compile) are skipped under `NOT_CRAN` unset; full suite ~5 min. |
 
 ### How to verify
 
@@ -859,34 +868,34 @@ on Ubuntu) before anything else.
 1. **Decide whether to train the v0.1 catalog now** (`configs/v0.1.yaml`,
    ~1 CPU-week unattended) or keep using smoke fixtures. The fingerprint
    pipeline is locked, so the package will accept the real catalog the
-   moment it's copied into `inst/extdata/decoders/`. Until then, the
-   end-to-end test in `test-fit.R` only confirms wiring, not recovery —
-   the run_hmc.R-style "90% CI covers truth" test waits for real
-   decoders.
-2. **Widen step 5 by lifting MVP gates one at a time.** Each gate is a
-   `stop()` in `deeprv_brm()` (search for "MVP:"); lifting it means
-   editing both that check and `build_stancode()`/`build_standata()`.
-   Suggested order, smallest first:
-   - **Covariates on the RHS.** Add a `model.matrix(parsed$rhs, data)`
-     call, push `X` and `K` into standata, add `vector[K] b; beta0 +
-     X * b` to the Stan program. Brms-style `prior(normal(0,1),
-     class = "b")` priors get translated to Stan prior statements.
-   - **Other families.** `gaussian()` and `bernoulli()` are obvious
-     next targets; family branching lives entirely in
-     `build_stancode()`.
-   - **`by = factor` and `by = numeric`.** The Stan side changes
-     shape (matrix `z`, vector `ls`); see section 2.4.2 / 2.4.3.
-   - **`gr = TRUE`.** Pure data-side change; see section 2.4.4.
-3. **§8 step 3 — coordinate helpers** in `R/coords.R`:
-   `rescale_to_unit_interval()`, `rescale_to_unit_square()`,
-   `which_grid_points()`, `snap_to_grid()`. Small, testable, no Stan
-   involvement. Can land in parallel with step 5 widening.
-4. **§8 step 6 — `posterior_predict.deepRV`, `conditional_effects.deepRV`.**
-   The `deeprv_fit` object already carries the stanfit and decoder;
-   adding these S3 methods is mostly a matter of extracting `z`/`ls`
-   draws, running them through `decode_mlp.stan` (R-side or via
-   `expose_stan_functions()`), and shaping the result like brms's
-   existing output.
+   moment it's copied into `inst/extdata/decoders/`. Until then,
+   end-to-end tests only confirm wiring, not recovery - the
+   run_hmc.R-style "90% CI covers truth" test waits for real decoders.
+2. **`ls_pooling != "complete"` for `by = factor`.** Two cases to add
+   in `R/stancode.R`:
+   - `"none"`: `vector[G] ls` with the same uniform prior applied
+     element-wise. Small Stan delta.
+   - `"partial"`: `vector[G] ls` plus `mu_ls ~ user_prior`,
+     `tau_ls ~` a half-normal default, and
+     `ls[g] ~ N(mu_ls, tau_ls^2)` truncated to `ls_trained_range`.
+     Needs a design call on the `tau_ls` prior; batch that to the
+     user before coding.
+3. **§8 step 8 - `gr = TRUE`.** Optimisation when unique grid locations
+   << N. Pure data-side: build a unique-obs index, decode once per
+   unique location, expand back when forming `spatial[n]`. Posterior
+   should equal the explicit-obs version up to MCSE.
+4. **§8 step 9 - Kronecker fit path for `deepRV_decoder_kron`.**
+   `load_deeprv_kron()` already returns the object; `deeprv_brm()`
+   refuses it. Stan model has `matrix[N, N] Z`, applies x-decoder
+   along columns then y-decoder along rows. Two `ls` parameters
+   (`ls_x`, `ls_y`) with separate priors; `cond_dim = 2`.
+5. **§8 step 10 - `deepRV_st(...)`.** 3D latent over `(T, L_x, L_y)`.
+   Time prior is `"rw"` / `"ar1"` / a 1D decoder. Big-ish change;
+   touches almost every R file.
+6. **§8 step 11 - vignettes + CRAN prep.** Three vignettes from
+   section 2.9: getting-started, SVC, space-time. Each needs a
+   runnable example, which means at least one real catalog decoder
+   shipped, which means the v0.1 catalog has been trained.
 
 ### Open questions to batch back to the user
 
