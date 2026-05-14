@@ -67,20 +67,31 @@ print.deepRV_call <- function(x, ...) {
 #' @export
 deepRV_st <- function(decoder, decoder_time = "rw",
                       obs_idx, time_idx, ls_prior,
-                      sigma_t_prior = prior_exp(1)) {
+                      sigma_t_prior = prior_exp(1),
+                      ls_t_prior = NULL) {
   if (!inherits(decoder, "deepRV_decoder")) {
     stop("`decoder` must be a deepRV_decoder from load_deeprv()",
          call. = FALSE)
   }
   if (inherits(decoder, "deepRV_decoder_kron")) {
-    stop("deepRV_st(): Kronecker spatial decoders aren't wired up in v0.1 ",
-         "(spatial side must be a 1D unit_interval decoder for now).",
-         call. = FALSE)
+    # The Kron spatial path is handled in build_stancode_st_kron; the
+    # `decoder_time` argument still applies as one of rw / ar1 / decoder.
   }
-  if (!identical(decoder_time, "rw")) {
-    stop("deepRV_st(): only decoder_time = \"rw\" is supported in v0.1. ",
-         "ar1 and decoder-based time priors are reserved for a follow-up.",
-         call. = FALSE)
+  if (inherits(decoder_time, "deepRV_decoder")) {
+    if (is.null(ls_t_prior)) {
+      stop("when decoder_time is a deepRV_decoder, ls_t_prior is required",
+           call. = FALSE)
+    }
+    if (!inherits(ls_t_prior, "deepRV_prior")) {
+      stop("ls_t_prior must be a deepRV_prior (e.g. prior_uniform(...))",
+           call. = FALSE)
+    }
+  } else if (is.character(decoder_time) && length(decoder_time) == 1L &&
+             decoder_time %in% c("rw", "ar1")) {
+    # OK
+  } else {
+    stop("deepRV_st(): decoder_time must be \"rw\", \"ar1\", or a ",
+         "deepRV_decoder for time", call. = FALSE)
   }
   call_args <- list(
     decoder       = decoder,
@@ -88,7 +99,8 @@ deepRV_st <- function(decoder, decoder_time = "rw",
     obs_idx       = obs_idx,
     time_idx      = time_idx,
     ls_prior      = ls_prior,
-    sigma_t_prior = sigma_t_prior
+    sigma_t_prior = sigma_t_prior,
+    ls_t_prior    = ls_t_prior
   )
   class(call_args) <- c("deepRV_st_call", "list")
   call_args

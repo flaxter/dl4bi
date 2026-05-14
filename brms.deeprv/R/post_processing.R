@@ -35,14 +35,34 @@ posterior_eta_draws <- function(fit) {
   }
 
   if (identical(by_mode, "st")) {
-    draws <- rstan::extract(fit$stanfit,
-                            pars = c("z", "ls", "sigma_t", "b"))
+    dec_t <- fit$deepRV$decoder_time
+    is_kron <- inherits(fit$decoder, "deepRV_decoder_kron")
+    pars <- c("z", "b")
+    if (is_kron) {
+      pars <- c(pars, "ls_x", "ls_y")
+    } else {
+      pars <- c(pars, "ls")
+    }
+    has_phi     <- "phi"     %in% fit$stanfit@model_pars
+    has_sigma_t <- "sigma_t" %in% fit$stanfit@model_pars
+    has_ls_t    <- "ls_t"    %in% fit$stanfit@model_pars
+    if (has_phi)     pars <- c(pars, "phi")
+    if (has_sigma_t) pars <- c(pars, "sigma_t")
+    if (has_ls_t)    pars <- c(pars, "ls_t")
+    draws <- rstan::extract(fit$stanfit, pars = pars)
     b <- as.matrix(draws$b)
     fixed <- b %*% t(X)
     time_idx <- as.integer(fit$standata$time_idx)
-    F_draws <- forward_st_batched(fit$decoder, draws$z, draws$ls,
-                                  draws$sigma_t)
-    # F_draws is (S, T, L); gather per observation by (time_idx, obs_idx).
+    F_draws <- forward_st_batched(
+      fit$decoder, draws$z,
+      ls_draws    = if (is_kron) NULL else draws$ls,
+      ls_x_draws  = if (is_kron) draws$ls_x else NULL,
+      ls_y_draws  = if (is_kron) draws$ls_y else NULL,
+      sigma_t_draws = if (has_sigma_t) draws$sigma_t else NULL,
+      phi_draws     = if (has_phi)     draws$phi     else NULL,
+      decoder_time  = if (inherits(dec_t, "deepRV_decoder")) dec_t else NULL,
+      ls_t_draws    = if (has_ls_t)    draws$ls_t    else NULL
+    )
     S <- dim(F_draws)[1L]
     N <- length(time_idx)
     spatial <- matrix(0, nrow = S, ncol = N)
@@ -110,20 +130,62 @@ forward_decode_batched <- function(decoder, z_draws, ls_draws) {
 # z (S, T, L), ls (S,), and sigma_t (S,), returns F (S, T, L) where
 # eps[s, t] = decode(z[s, t], ls[s]) and
 # F[s, t] = F[s, t-1] + sigma_t[s] * eps[s, t] with F[s, 0] = 0.
-forward_st_batched <- function(decoder, z_draws, ls_draws, sigma_t_draws) {
+forward_st_batched <- function(decoder, z_draws, ls_draws = NULL,
+                               sigma_t_draws = NULL,
+                               phi_draws = NULL,
+                               decoder_time = NULL, ls_t_draws = NULL,
+                               ls_x_draws = NULL, ls_y_draws = NULL) {
   S <- dim(z_draws)[1L]
   T_full <- dim(z_draws)[2L]
   L <- dim(z_draws)[3L]
+  # Step 1: spatial decode per time step -> eps (S, T, L).
+  eps <- array(0, dim = c(S, T_full, L))
+  is_kron <- inherits(decoder, "deepRV_decoder_kron")
+  if (is_kron) {
+    N_side <- as.integer(decoder$grid_side)
+    for (t in seq_len(T_full)) {
+      # Reshape (S, L) -> (S, N_side, N_side) column-major: matches Stan's
+      # to_matrix(z[t], N_side, N_side) ordering.
+      zt <- array(z_draws[, t, ], dim = c(S, N_side, N_side))
+      eps[, t, ] <- forward_decode_kron_batched(decoder, zt,
+                                                 ls_x_draws, ls_y_draws)
+    }
+  } else {
+    for (t in seq_len(T_full)) {
+      eps[, t, ] <- forward_decode_batched(decoder, z_draws[, t, ], ls_draws)
+    }
+  }
+  # Step 2: combine in time.
+  if (inherits(decoder_time, "deepRV_decoder")) {
+    # Apply the time decoder column-wise: for each spatial point j and
+    # each draw s, F[s, :, j] = decode_t(eps[s, :, j], ls_t[s]).
+    F_draws <- array(0, dim = c(S, T_full, L))
+    for (j in seq_len(L)) {
+      # eps[, , j] is (S, T) — exactly the shape forward_decode_batched wants.
+      F_draws[, , j] <- forward_decode_batched(decoder_time, eps[, , j],
+                                                ls_t_draws)
+    }
+    return(F_draws)
+  }
+  # rw / ar1 path: scalar sigma_t, optional phi (ar1).
   F_draws <- array(0, dim = c(S, T_full, L))
-  prev <- matrix(0, nrow = S, ncol = L)
+  ar1 <- !is.null(phi_draws)
   for (t in seq_len(T_full)) {
-    eps_t <- forward_decode_batched(decoder, z_draws[, t, ], ls_draws)
-    # Row-wise scale: sigma_t_draws[s] multiplies eps_t[s, ]. Use sweep
-    # so the broadcast doesn't depend on whether sigma_t_draws carries
-    # a dim attribute from rstan::extract.
-    F_t <- prev + sweep(eps_t, 1L, sigma_t_draws, FUN = "*")
+    eps_t <- eps[, t, ]
+    scaled <- sweep(eps_t, 1L, sigma_t_draws, FUN = "*")
+    if (t == 1L) {
+      if (ar1) {
+        init_scale <- 1 / sqrt(1 - phi_draws^2)
+        F_t <- sweep(scaled, 1L, init_scale, FUN = "*")
+      } else {
+        F_t <- scaled
+      }
+    } else {
+      prev <- F_draws[, t - 1L, ]
+      if (ar1) prev <- sweep(prev, 1L, phi_draws, FUN = "*")
+      F_t <- prev + scaled
+    }
     F_draws[, t, ] <- F_t
-    prev <- F_t
   }
   F_draws
 }

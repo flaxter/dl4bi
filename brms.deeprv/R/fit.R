@@ -208,7 +208,12 @@ deeprv_brm_st <- function(parsed, dr_call, data, fam, chains, iter, warmup,
          fam$family, call. = FALSE)
   }
   decoder <- dr_call$decoder
-  validate_decoder(decoder, source = "<deeprv_brm_st input>")
+  if (inherits(decoder, "deepRV_decoder_kron")) {
+    validate_decoder(decoder$x_decoder,
+                     source = "<deeprv_brm_st Kron x_decoder>")
+  } else {
+    validate_decoder(decoder, source = "<deeprv_brm_st input>")
+  }
   validate_prior_in_range(dr_call$ls_prior, decoder$ls_trained_range,
                           decoder_label = decoder_label(decoder))
 
@@ -216,7 +221,9 @@ deeprv_brm_st <- function(parsed, dr_call, data, fam, chains, iter, warmup,
   X <- build_design_matrix(parsed$rhs, data)
 
   stancode <- build_stancode_st(decoder, dr_call$ls_prior,
-                                dr_call$sigma_t_prior, fam$family)
+                                dr_call$sigma_t_prior, fam$family,
+                                decoder_time = dr_call$decoder_time,
+                                ls_t_prior = dr_call$ls_t_prior)
   standata <- build_standata_st(decoder, dr_call, y, X, fam$family)
 
   sampling_args <- list(

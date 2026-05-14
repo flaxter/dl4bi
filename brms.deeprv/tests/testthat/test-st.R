@@ -50,21 +50,13 @@ test_that("deepRV_st() captures arguments into a deepRV_st_call", {
   expect_output(print(spec), "deepRV_st_call")
 })
 
-test_that("deepRV_st() rejects non-rw / Kron decoders", {
-  dr_kron <- load_deeprv_kron("unit_square", grid_side = 10,
-                               kernel = "matern_1_2")
+test_that("deepRV_st() rejects bogus decoder_time", {
   dr <- load_deeprv("unit_interval", grid_size = 10, kernel = "matern_1_2")
   expect_error(
-    deepRV_st(decoder = dr_kron, decoder_time = "rw",
+    deepRV_st(decoder = dr, decoder_time = "bogus",
               obs_idx = 1:10, time_idx = rep(1L, 10),
               ls_prior = prior_uniform(0.05, 0.5)),
-    "Kronecker"
-  )
-  expect_error(
-    deepRV_st(decoder = dr, decoder_time = "ar1",
-              obs_idx = 1:10, time_idx = rep(1L, 10),
-              ls_prior = prior_uniform(0.05, 0.5)),
-    "decoder_time = \"rw\""
+    "decoder_time must be"
   )
 })
 
@@ -120,4 +112,97 @@ test_that("posterior_eta_draws() recovers F in the ST model", {
   }
   expected <- b %*% t(fit$X) + expected
   expect_lt(max(abs(eta - expected)), 1e-3)
+})
+
+test_that("deepRV_st(decoder_time = <decoder>) fits with two length-scales", {
+  skip_if_no_rstan()
+  skip_on_cran()
+
+  fix <- make_st_fixture()
+  T_full <- 5L  # matches make_st_fixture's T = 5
+  dr_t <- load_deeprv("unit_interval", grid_size = T_full,
+                      kernel = "matern_3_2")
+  fit <- deeprv_brm(
+    y ~ deepRV_st(decoder = fix$dr, obs_idx = obs_idx, time_idx = time_idx,
+                  ls_prior = prior_uniform(0.05, 0.5),
+                  decoder_time = dr_t,
+                  ls_t_prior = prior_uniform(0.05, 0.5)),
+    data = fix$df, family = poisson(),
+    chains = 1L, iter = 100L, warmup = 50L, seed = 1L, cores = 1L
+  )
+  expect_true("ls_t" %in% fit$stanfit@model_pars)
+  expect_false("sigma_t" %in% fit$stanfit@model_pars)
+  draws <- rstan::extract(fit$stanfit, pars = c("z", "ls", "ls_t", "F"))
+  r_F <- brms.deeprv:::forward_st_batched(
+    fix$dr, draws$z, ls_draws = draws$ls,
+    decoder_time = dr_t, ls_t_draws = draws$ls_t
+  )
+  expect_equal(dim(r_F), dim(draws$F))
+  expect_lt(max(abs(r_F - draws$F)), 1e-3)
+})
+
+test_that("deepRV_st with Kron spatial fits", {
+  skip_if_no_rstan()
+  skip_on_cran()
+
+  dr_kron <- load_deeprv_kron("unit_square", grid_side = 5,
+                               kernel = "matern_1_2")
+  set.seed(67L)
+  L <- as.integer(dr_kron$L)
+  T_full <- 3L
+  # Build observations across the L=25 grid * 3 time steps.
+  rows <- expand.grid(spatial = seq_len(L), t = seq_len(T_full))
+  rows$obs_idx <- rows$spatial
+  rows$time_idx <- rows$t
+  rows$y <- rpois(nrow(rows), 1)
+  fit <- deeprv_brm(
+    y ~ deepRV_st(decoder = dr_kron, obs_idx = obs_idx, time_idx = time_idx,
+                  ls_prior = prior_uniform(0.05, 0.5),
+                  sigma_t_prior = prior_exp(1)),
+    data    = rows, family = poisson(),
+    chains  = 1L, iter = 100L, warmup = 50L, seed = 1L, cores = 1L
+  )
+  expect_true(all(c("ls_x", "ls_y", "sigma_t", "F")
+                  %in% fit$stanfit@model_pars))
+  expect_identical(fit$standata$N_side, 5L)
+
+  draws <- rstan::extract(fit$stanfit,
+                          pars = c("z", "ls_x", "ls_y", "sigma_t", "F"))
+  r_F <- brms.deeprv:::forward_st_batched(
+    dr_kron, draws$z,
+    ls_x_draws = draws$ls_x,
+    ls_y_draws = draws$ls_y,
+    sigma_t_draws = draws$sigma_t
+  )
+  expect_equal(dim(r_F), dim(draws$F))
+  expect_lt(max(abs(r_F - draws$F)), 1e-3)
+})
+
+test_that("deepRV_st(decoder_time = \"ar1\") fits with stationary init", {
+  skip_if_no_rstan()
+  skip_on_cran()
+
+  fix <- make_st_fixture()
+  fit <- deeprv_brm(
+    y ~ deepRV_st(decoder = fix$dr, obs_idx = obs_idx, time_idx = time_idx,
+                  ls_prior = prior_uniform(0.05, 0.5),
+                  sigma_t_prior = prior_exp(1),
+                  decoder_time = "ar1"),
+    data = fix$df, family = poisson(),
+    chains = 1L, iter = 100L, warmup = 50L, seed = 1L, cores = 1L
+  )
+  expect_identical(fit$deepRV$decoder_time, "ar1")
+  expect_true("phi" %in% fit$stanfit@model_pars)
+  # phi posterior strictly inside (-1, 1)
+  phi <- rstan::extract(fit$stanfit, pars = "phi")$phi
+  expect_true(all(phi > -1 & phi < 1))
+
+  # R-side forward with phi should match Stan's F.
+  draws <- rstan::extract(fit$stanfit,
+                          pars = c("z", "ls", "sigma_t", "phi", "F"))
+  r_F <- brms.deeprv:::forward_st_batched(fix$dr, draws$z, draws$ls,
+                                           draws$sigma_t,
+                                           phi_draws = draws$phi)
+  expect_equal(dim(r_F), dim(draws$F))
+  expect_lt(max(abs(r_F - draws$F)), 1e-3)
 })

@@ -862,24 +862,26 @@ Recommended order for the v0.1 build:
    2D data frame `(grid_index, s_x, s_y, estimate, lower, upper)` and
    the `plot()` method draws a viridis heatmap with white contour
    overlay. `by` is rejected with Kron decoders in v0.1.
-10. **`deepRV_st(...)` + RW/AR1/decoder time priors** —
-    **RW + 1D space + Poisson/Gaussian done (MVP).** `R/formula.R`:
-    `deepRV_st(decoder, decoder_time, obs_idx, time_idx, ls_prior,
-    sigma_t_prior)` is a marker that yields a `deepRV_st_call`;
-    `parse_deeprv_formula()` recognises both `deepRV` and `deepRV_st`.
-    `R/stancode.R::build_stancode_st()` emits a program with
-    `matrix[T, L] z`, computes per-time `eps[t] = decode(z[t], ls)`,
-    then accumulates `F[t] = F[t-1] + sigma_t * eps[t]`. Likelihood
-    gathers `F[time_idx[n], obs_idx[n]]` per observation.
-    `R/priors.R::prior_exp(rate)` is the new exponential-prior helper;
-    the default `sigma_t_prior` is `prior_exp(1)`.
-    `R/post_processing.R::forward_st_batched()` is the matching
-    R-side batched forward; test confirms < 1e-3 match against
-    Stan's `F` (S, T, L). `deeprv_brm()` dispatches via a separate
-    `deeprv_brm_st()` helper. Remaining work: `decoder_time = "ar1"`,
-    `decoder_time = <1D decoder>`, Kronecker spatial decoders,
-    `by` / `gr` combined with space-time. Each is a follow-up commit
-    rather than a v0.1 blocker.
+10. ~~**`deepRV_st(...)` + RW/AR1/decoder time priors**~~ — **done
+    for v0.1.** Space-time term covers six combinations:
+    `{1D space, Kron space}` × `{rw, ar1, <decoder> time}`.
+    - **1D space + rw**: existing baseline. `F[t] = F[t-1] + sigma_t * eps[t]`.
+    - **1D space + ar1**: adds `phi in (-1, 1)` with stationary
+      initialisation `F[1] = (sigma_t/sqrt(1-phi^2)) * eps[1]`.
+    - **1D space + decoder time**: applies a 1D time decoder
+      column-wise to `eps`. New required arg `ls_t_prior` for the
+      time decoder's length-scale. `sigma_t_prior` is ignored
+      because the time decoder bakes the amplitude in.
+    - **Kron space + any time**: spatial latent z is matrix[T, L]
+      with L = N_side^2; per time step it's reshaped column-major
+      to (N_side, N_side) and passed through the axis decoder along
+      columns (`ls_x`) then along rows (`ls_y`). The time block
+      (rw / ar1 / decoder) applies as in the 1D case, sharing logic
+      via the `time_block()` helper.
+    `forward_st_batched()` is the matching R-side pipeline; tests
+    cover all six combinations with < 1e-3 match against Stan's
+    `F` (S, T, L). Remaining work (v0.2): `by` / `gr` combined with
+    space-time.
 11. **Vignettes, polishing, CRAN submission prep.** ~1 week.
 
 **Total v0.1 estimate: ~6 person-weeks of engineering + GPU/CPU time for

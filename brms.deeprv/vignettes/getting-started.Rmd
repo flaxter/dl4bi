@@ -126,10 +126,10 @@ white contour overlay).
 
 ## Where to go next
 
-- `vignette("02-spatial-varying-coefficients")` — pass a numeric `by`
-  to deepRV for a spatially-varying coefficient model.
-- `vignette("03-space-time")` — `deepRV_st()` for a random-walk-in-time
-  space-time field.
+- `vignette("spatial-varying-coefficients")` (forthcoming) — pass a
+  numeric `by` to `deepRV()` for a spatially-varying coefficient model.
+- `vignette("space-time")` (forthcoming) — `deepRV_st()` for a
+  random-walk / AR1 / decoder-time space-time field.
 - The smooth quality is bounded by the decoder's training MSE. For
   the L=100 RBF decoder shipped with v0.1, MSE ≈ 0.03 — adequate for
   most applied work. If you need tighter approximation, train your own
