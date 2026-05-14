@@ -1,0 +1,136 @@
+---
+title: "Getting started with brms.deeprv"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with brms.deeprv}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 7,
+                      fig.height = 4, dpi = 110)
+```
+
+`brms.deeprv` lets you drop a fast spatial smooth into a brms-style
+Poisson / Gaussian regression by adding a `deepRV(...)` term to the
+formula. The smooth is computed via a pre-trained MLP decoder rather
+than an exact Cholesky of the GP kernel matrix - same posterior shape,
+much faster sampling at moderate-to-large grid sizes.
+
+```{r setup, message = FALSE}
+library(brms.deeprv)
+library(rstan)
+set.seed(1)
+```
+
+## 1. Pick a decoder from the catalog
+
+The package ships 32 pre-trained decoders covering the cross product
+of `(grid_size, kernel)` for `grid_size in {5, 10, 20, 50, 100, 200,
+500, 1000}` and `kernel in {matern_1_2, matern_3_2, matern_5_2, rbf}`.
+
+```{r}
+dr <- load_deeprv(domain    = "unit_interval",
+                  grid_size = 100,
+                  kernel    = "matern_3_2")
+print(dr)
+```
+
+Each decoder owns its training grid (uniform on `[0, 1]` in v0.1)
+and a length-scale prior range. Your `ls_prior` must fit inside
+`dr$ls_trained_range`.
+
+## 2. Generate a small synthetic example
+
+We'll fake a Poisson count process whose log-rate is a smooth field on
+the decoder's 100-point grid.
+
+```{r simulate}
+L  <- as.integer(dr$L)
+z  <- rnorm(L)
+ls <- 0.15  # ground-truth length-scale, well inside dr's [0.01, 1.0]
+W1 <- dr$weights$W1; b1 <- dr$weights$b1
+W2 <- dr$weights$W2; b2 <- dr$weights$b2
+relu <- function(x) pmax(x, 0)
+mu_true <- as.numeric(crossprod(W2, relu(crossprod(W1, c(z, ls)) + b1)) + b2)
+y <- rpois(L, exp(mu_true))
+
+df <- data.frame(s       = dr$grid_coords,
+                 y       = y,
+                 obs_idx = seq_len(L))
+head(df)
+```
+
+In a real workflow you wouldn't synthesise `mu_true` from the decoder;
+you'd have a count vector and a coordinate vector. Two helper rules:
+
+- All observations must sit on `dr$grid_coords`. Use
+  `rescale_to_unit_interval()` to map your `[xmin, xmax]` into `[0, 1]`,
+  then `which_grid_points()` to get `obs_idx`. `snap_to_grid()`
+  handles the rounding case when your `s` lives between grid points.
+- `ls_prior` is required and must fit inside `dr$ls_trained_range`.
+
+## 3. Fit
+
+```{r fit, results = "hide"}
+options(mc.cores = 2)
+fit <- deeprv_brm(
+  y ~ deepRV(s,
+             decoder  = dr,
+             obs_idx  = obs_idx,
+             ls_prior = prior_uniform(0.05, 0.5)),
+  data    = df,
+  family  = poisson(),
+  chains  = 2,
+  iter    = 1000,
+  warmup  = 500,
+  seed    = 1
+)
+```
+
+```{r}
+print(fit)
+```
+
+`fit` is a `deeprv_fit` wrapping the underlying `stanfit`, the
+generated Stan code (under `fit$stancode`), the data list passed to
+Stan (`fit$standata`), and the decoder.
+
+## 4. Posterior predict / epred
+
+```{r}
+ypred <- posterior_predict(fit)        # response-scale Poisson draws
+epred <- posterior_epred(fit)          # expected rate exp(eta)
+dim(ypred)                              # (n_draws, n_obs)
+```
+
+`posterior_predict()` / `posterior_epred()` are S3 methods on
+`rstantools`'s generics, so they dispatch naturally after
+`library(brms.deeprv)` or `library(rstantools)`.
+
+## 5. conditional_effects: the smooth itself
+
+The single highest-leverage post-processing tool is
+`conditional_effects()` — it returns the per-grid-point posterior
+mean and credible interval of the decoder's `mu`, ready to plot.
+
+```{r ce, fig.alt = "Posterior mean of the deepRV smooth with 90% CI ribbon"}
+ce <- conditional_effects(fit, probs = c(0.05, 0.95))
+plot(ce)
+```
+
+`conditional_effects()` honours `by = factor` (one panel per group)
+and `unit_square` Kronecker decoders (drawn as a viridis heatmap with
+white contour overlay).
+
+## Where to go next
+
+- `vignette("02-spatial-varying-coefficients")` — pass a numeric `by`
+  to deepRV for a spatially-varying coefficient model.
+- `vignette("03-space-time")` — `deepRV_st()` for a random-walk-in-time
+  space-time field.
+- The smooth quality is bounded by the decoder's training MSE. For
+  the L=100 RBF decoder shipped with v0.1, MSE ≈ 0.03 — adequate for
+  most applied work. If you need tighter approximation, train your own
+  via the recipe in `benchmarks/vae/rstan/train_decoders.py`.

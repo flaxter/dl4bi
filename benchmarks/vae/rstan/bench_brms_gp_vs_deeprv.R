@@ -28,6 +28,21 @@ rstan_options(auto_write = TRUE)
 args <- commandArgs(trailingOnly = TRUE)
 write_md <- "--write" %in% args
 align_priors <- "--align-priors" %in% args
+# Include HSGP (Hilbert-space GP approximation, Riutort-Mayol et al. 2023)
+# as a third method. brms::gp(s, k = K, c = c_val) builds K basis
+# functions over [-c*L_dom, c*L_dom] (c >= 1). For 1D with grid on [0, 1]
+# and length-scale ~0.2 the rule of thumb is K >= 1.75 * c / lscale, so
+# K = 20 / c = 1.5 is comfortable.
+include_hsgp <- "--include-hsgp" %in% args
+# Skip the exact-GP fit (useful when sweeping large L where O(L^3) is
+# prohibitive but HSGP + deeprv still fit in minutes).
+skip_exact <- "--skip-exact" %in% args
+hsgp_k <- if (any(grepl("--hsgp-k=", args))) {
+  as.integer(sub("--hsgp-k=", "", args[grepl("--hsgp-k=", args)]))
+} else 20L
+hsgp_c <- if (any(grepl("--hsgp-c=", args))) {
+  as.numeric(sub("--hsgp-c=", "", args[grepl("--hsgp-c=", args)]))
+} else 1.5
 grids <- if (any(grepl("--grids=", args))) {
   spec <- sub("--grids=", "", args[grepl("--grids=", args)])
   as.integer(strsplit(spec, ",", fixed = TRUE)[[1L]])
@@ -47,8 +62,10 @@ ls_lo  <- 0.05
 ls_hi  <- 0.5
 seed   <- 1L
 
-cat(sprintf("[bench config] grids=%s iter=%d (warmup %d) align_priors=%s\n",
-            paste(grids, collapse = ","), iter, warmup, align_priors))
+cat(sprintf("[bench config] grids=%s iter=%d (warmup %d) align_priors=%s include_hsgp=%s%s\n",
+            paste(grids, collapse = ","), iter, warmup, align_priors,
+            include_hsgp,
+            if (include_hsgp) sprintf(" (k=%d, c=%g)", hsgp_k, hsgp_c) else ""))
 
 # ---- synthetic fixture per grid -------------------------------------------
 make_fixture <- function(L, ls_true = 0.2, beta0_true = 0.0, seed = 1L) {
@@ -86,6 +103,34 @@ fit_brms_gp <- function(df, iter, warmup, seed, align_priors = FALSE) {
   t0 <- Sys.time()
   fit <- brms::brm(
     y ~ gp(s, cov = "exp_quad", scale = FALSE),
+    data    = df,
+    family  = poisson(),
+    prior   = brms_prior,
+    chains  = 2L,
+    iter    = iter,
+    warmup  = warmup,
+    seed    = seed,
+    refresh = 0,
+    control = list(adapt_delta = 0.95),
+    backend = "rstan"
+  )
+  wall <- as.numeric(Sys.time() - t0, units = "secs")
+  list(fit = fit, wall = wall)
+}
+
+# ---- fit via brms::gp(... k = K, c = c) ------------------------------------
+# Hilbert-space GP approximation. K basis functions over the extended
+# domain [-c*L_dom, c*L_dom]. Per-iter cost is O(K^2 + K*N), much faster
+# than the O(L^3) Cholesky of the exact GP at large L.
+fit_brms_hsgp <- function(df, k, c_val, iter, warmup, seed, align_priors) {
+  brms_prior <- NULL
+  if (align_priors) {
+    brms_prior <- brms::prior_string(sprintf("uniform(%g, %g)", ls_lo, ls_hi),
+                                     class = "lscale", coef = "gps")
+  }
+  t0 <- Sys.time()
+  fit <- brms::brm(
+    bf(y ~ gp(s, cov = "exp_quad", scale = FALSE, k = k, c = c_val)),
     data    = df,
     family  = poisson(),
     prior   = brms_prior,
@@ -141,13 +186,30 @@ for (L in grids) {
   cat(sprintf("\n=== L = %d ===\n", L))
   df <- make_fixture(L, seed = seed)
 
-  cat(sprintf("  fitting brms::gp() ...\n"))
-  r_brms <- fit_brms_gp(df, iter, warmup, seed, align_priors = align_priors)
-  # posterior_linpred returns (S, N) draws of eta on the link scale.
-  brms_eta <- brms::posterior_linpred(r_brms$fit)
-  brms_post_mean <- colMeans(brms_eta)
-  brms_ndiv <- ndiv(r_brms$fit$fit)
-  brms_rhat <- rhat_max_all(r_brms$fit$fit)
+  r_brms <- NULL
+  brms_post_mean <- NULL
+  brms_wall_s <- NA_real_; brms_rhat <- NA_real_; brms_ndiv <- NA_integer_
+  if (!skip_exact) {
+    cat(sprintf("  fitting brms::gp() (exact) ...\n"))
+    r_brms <- fit_brms_gp(df, iter, warmup, seed, align_priors = align_priors)
+    brms_eta <- brms::posterior_linpred(r_brms$fit)
+    brms_post_mean <- colMeans(brms_eta)
+    brms_wall_s <- r_brms$wall
+    brms_ndiv <- ndiv(r_brms$fit$fit)
+    brms_rhat <- rhat_max_all(r_brms$fit$fit)
+  }
+
+  r_hsgp <- NULL
+  if (include_hsgp) {
+    cat(sprintf("  fitting brms::gp() HSGP (k=%d, c=%g) ...\n",
+                hsgp_k, hsgp_c))
+    r_hsgp <- fit_brms_hsgp(df, hsgp_k, hsgp_c, iter, warmup, seed,
+                            align_priors = align_priors)
+    hsgp_eta <- brms::posterior_linpred(r_hsgp$fit)
+    hsgp_post_mean <- colMeans(hsgp_eta)
+    hsgp_ndiv <- ndiv(r_hsgp$fit$fit)
+    hsgp_rhat <- rhat_max_all(r_hsgp$fit$fit)
+  }
 
   cat(sprintf("  fitting deeprv_brm() ...\n"))
   r_drv <- fit_deeprv(df, ls_lo, ls_hi, iter, warmup, seed)
@@ -156,23 +218,33 @@ for (L in grids) {
   drv_ndiv <- ndiv(r_drv$fit$stanfit)
   drv_rhat <- rhat_max_all(r_drv$fit$stanfit)
 
-  # Per-grid posterior mean discrepancy of eta: deeprv vs brms.
-  eta_diff <- drv_post_mean - brms_post_mean
-  rmse <- sqrt(mean(eta_diff^2))
-  truth <- df$mu_true  # truth was generated with beta0 = 0, so eta = mu
-  truth_rmse_brms <- sqrt(mean((brms_post_mean - truth)^2))
+  truth <- df$mu_true   # truth was generated with beta0 = 0, so eta = mu
   truth_rmse_drv  <- sqrt(mean((drv_post_mean - truth)^2))
+  truth_rmse_brms <- if (skip_exact) NA_real_ else
+    sqrt(mean((brms_post_mean - truth)^2))
+  eta_rmse_drv_vs_brms <- if (skip_exact) NA_real_ else
+    sqrt(mean((drv_post_mean - brms_post_mean)^2))
 
-  rows[[length(rows) + 1L]] <- data.frame(
+  row <- data.frame(
     L = L,
-    brms_wall_s = r_brms$wall, drv_wall_s = r_drv$wall,
-    speedup = r_brms$wall / r_drv$wall,
+    brms_wall_s = brms_wall_s, drv_wall_s = r_drv$wall,
+    speedup = if (skip_exact) NA_real_ else brms_wall_s / r_drv$wall,
     brms_rhat = brms_rhat, drv_rhat = drv_rhat,
     brms_ndiv = brms_ndiv, drv_ndiv = drv_ndiv,
-    eta_rmse_drv_vs_brms = rmse,
+    eta_rmse_drv_vs_brms = eta_rmse_drv_vs_brms,
     truth_rmse_brms = truth_rmse_brms,
     truth_rmse_drv  = truth_rmse_drv
   )
+  if (include_hsgp) {
+    row$hsgp_wall_s <- r_hsgp$wall
+    row$hsgp_rhat <- hsgp_rhat
+    row$hsgp_ndiv <- hsgp_ndiv
+    row$hsgp_speedup_vs_drv <- r_hsgp$wall / r_drv$wall
+    row$truth_rmse_hsgp <- sqrt(mean((hsgp_post_mean - truth)^2))
+    row$eta_rmse_drv_vs_hsgp <- sqrt(mean((drv_post_mean - hsgp_post_mean)^2))
+    row$eta_rmse_brms_vs_hsgp <- sqrt(mean((brms_post_mean - hsgp_post_mean)^2))
+  }
+  rows[[length(rows) + 1L]] <- row
 }
 
 out <- do.call(rbind, rows)
