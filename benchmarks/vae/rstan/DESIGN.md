@@ -724,13 +724,23 @@ Recommended order for the v0.1 build:
    reference. The full 32-decoder catalog still has to be **trained** —
    that's the wall-clock cost (~1 GPU-day / ~1 CPU-week), but the
    pipeline is built.
-2. **R package skeleton + `load_deeprv()`** — load from `inst/extdata/decoders/`
-   with manifest validation. ~2 days.
+2. ~~**R package skeleton + `load_deeprv()`**~~ — **done.** Package at
+   `brms.deeprv/` with `DESCRIPTION`, `NAMESPACE`, `R/load_decoder.R`
+   (`load_deeprv`, `load_deeprv_kron`, S3 `print` methods), `R/utils.R`
+   (`deeprv_fingerprint`, `validate_decoder`), `inst/extdata/decoders/`
+   seeded with the smoke artifacts, `inst/stan/decode_mlp.stan` (the
+   forward function), `man/*.Rd`. `R CMD check --no-manual` passes with
+   zero notes/warnings/errors; 42 testthat assertions green including
+   the forward-parity check from step 4 below.
 3. **Coordinate helpers** — `rescale_to_unit_interval()`, `which_grid_points()`,
    `snap_to_grid()`. ~1 day.
-4. **Forward-match tests** — port `verify_numpy.py` and `check_match.R` to the
-   package's test suite. Every shipped decoder validated at install time.
-   ~1 day.
+4. ~~**Forward-match tests**~~ — **done as part of step 2** —
+   `tests/testthat/test-forward.R` loops over every shipped decoder,
+   exposes `decode_mlp.stan::decode` via `rstan::expose_stan_functions`,
+   and compares JAX-saved golden cases to < 1e-5 (currently passing
+   at ~1e-7 for both smoke decoders). Step 4's role in the build order
+   is now "extend the parity test to cover every decoder in
+   `configs/v0.1.yaml` once the catalog is trained."
 5. **`deepRV()` formula term + `deeprv_brm()` wrapper** — basic spatial only
    (no `by`, no `gr`). Reuses `run_hmc.R` patterns. ~1 week.
 6. **`posterior_predict.deepRV`, `conditional_effects.deepRV`** — minimal
@@ -749,54 +759,80 @@ the catalog.**
 
 ## 9 · Handoff bundle
 
-Branch: `claude/deeprv-rstan-integration-VDtiw` at `77286a6`.
-Step 1 (training pipeline) is done; step 2 (R package skeleton +
-`load_deeprv()`) is the next thing to write.
+Branch: `claude/deeprv-rstan-integration-VDtiw`.
+Steps 1, 2, and the install-time forward-match (the part of step 4
+gated on the smoke catalog) are done. Next is §8 step 3
+(coordinate helpers) and/or §8 step 5 (`deepRV()` formula term +
+`deeprv_brm()` wrapper).
 
-The fresh agent should:
+### What's in place
 
-1. **Read this document end-to-end.** Especially §2 (scope), §4 (the
-   non-obvious gotchas) and §8 (build order).
-2. **Read `benchmarks/vae/rstan/RESULTS.md`** for the empirical baseline
-   that drove the design (~42 s MLP, ~138 min gMLP).
-3. **Verify the environment** — the original prototype's forward-parity
-   check is the cheap, fast smoke test:
-   ```bash
-   cd <repo>
-   Rscript benchmarks/vae/rstan/check_match.R   # PASS at ~6e-7, < 1 min
-   ```
-   If that fails, the dev environment is wrong; see §4.6 for the most
-   likely cause (Boost headers on Ubuntu).
-4. **Verify the new catalog pipeline still round-trips** — also fast:
-   ```bash
-   uv run --extra cpu --extra benchmarks python \
-     benchmarks/vae/rstan/train_decoders.py \
-     --config benchmarks/vae/rstan/configs/smoke.yaml
-   Rscript benchmarks/vae/rstan/pack_decoders.R \
-     benchmarks/vae/rstan/artifacts/decoders/smoke
-   Rscript benchmarks/vae/rstan/verify_rds.R \
-     benchmarks/vae/rstan/artifacts/decoders/smoke/unit_interval_10_matern_1_2.rds
-   # Final line should read "PASS (< 1e-05)".
-   ```
-   Total wall time: ~30 s including R compile cache miss.
-5. **Decide on the catalog before the package work, or after.** Two
-   reasonable paths:
-   - **Train the catalog first** (`configs/v0.1.yaml`, ~1 CPU-week
-     unattended). Then the R package has real artifacts to load.
-   - **Skip to §8 step 2** and use the smoke artifacts (or a slightly
-     enlarged smoke config — e.g. one full `(grid_size, kernel)` pair
-     at 100k steps) as the test fixture for the package work. Train
-     the full catalog later, before any release.
-   The second path is faster to a working package; the first path
-   gives a real demo. Pick based on what the user actually needs next.
-6. **Start §8 step 2** — R package skeleton (`brms.deeprv/`) and
-   `load_deeprv()`. See §2.3.1 and §2.9 for the target shape.
+| Path | Role |
+|---|---|
+| `benchmarks/vae/rstan/train_decoders.py` | Step 1 trainer |
+| `benchmarks/vae/rstan/pack_decoders.R` | Step 1 JSON → .rds packer |
+| `benchmarks/vae/rstan/verify_rds.R` | Step 1 install-time forward check |
+| `brms.deeprv/DESCRIPTION`, `NAMESPACE`, `LICENSE`, `.gitignore` | Step 2 package metadata |
+| `brms.deeprv/R/utils.R` | `deeprv_fingerprint()`, `validate_decoder()`. **The Python and R fingerprint formulas live here and in `train_decoders.py` + `pack_decoders.R` — keep them in lock-step.** |
+| `brms.deeprv/R/load_decoder.R` | `load_deeprv()`, `load_deeprv_kron()`, S3 `print` methods. Decoder dir overridable via `options(brms.deeprv.decoder_dir)` or `BRMS_DEEPRV_DECODER_DIR` env var. |
+| `brms.deeprv/R/zzz.R` | `.onLoad`: env-var → option bridge |
+| `brms.deeprv/inst/extdata/decoders/` | Smoke catalog seed (2 unit_interval_10 decoders + manifest.json). Replace with the v0.1 catalog before release. |
+| `brms.deeprv/inst/stan/decode_mlp.stan` | The shipped `decode` function (Stan, no model block). Bumping this REQUIRES bumping `arch_version` in the catalog. |
+| `brms.deeprv/man/*.Rd` | Hand-written; switch to roxygen2 generation once that dep is installed. |
+| `brms.deeprv/tests/testthat/test-load.R` | 27 assertions: manifest hit/miss, kernel/domain validation, fingerprint tamper detection, Python ↔ R fingerprint byte-equality. |
+| `brms.deeprv/tests/testthat/test-forward.R` | rstan-vs-JAX forward parity across every shipped decoder. 15 assertions, ~24 s including Stan compile. |
 
-Open questions to batch back to the user when they come up:
+### How to verify
 
-- **Where does the package live?** Same repo (`R/brms.deeprv/`) or its
-  own repo? The design doc assumes a separate package eventually but
-  is silent on the location during development.
+```bash
+# Cheap sanity (~1 min, hits the rstan Boost env): the legacy prototype
+# check is independent of the package and is the first thing to run.
+Rscript benchmarks/vae/rstan/check_match.R
+
+# Package check (~10 s after Stan cache warm):
+R CMD build brms.deeprv && R CMD check --no-manual brms.deeprv_*.tar.gz
+```
+
+If `check_match.R` fails, the dev env is wrong — see §4.6 (Boost headers
+on Ubuntu) before anything else.
+
+### Decisions made along the way
+
+- **Package location:** top-level `brms.deeprv/` in this repo. Split
+  into a separate repo only when CRAN-bound.
+- **Catalog timing:** smoke fixtures first, full v0.1 catalog later.
+  Path 2 in the previous handoff. The smoke `.rds` files in
+  `inst/extdata/decoders/` are dev fixtures, not shippable artifacts;
+  bumping `arch_version` is fine because no users exist yet.
+- **License:** MIT, declared in `DESCRIPTION` and `LICENSE`.
+- **Docs:** hand-written `man/*.Rd` for now. If you have `roxygen2`
+  installed and want to regenerate, the source comments are still in
+  the R files.
+
+### What the next agent should pick up
+
+1. **Decide whether to train the v0.1 catalog now** (`configs/v0.1.yaml`,
+   ~1 CPU-week unattended) or keep using smoke fixtures. The fingerprint
+   pipeline is locked, so the package will accept the real catalog the
+   moment it's copied into `inst/extdata/decoders/`.
+2. **§8 step 3 — coordinate helpers** in `R/coords.R`:
+   `rescale_to_unit_interval()`, `rescale_to_unit_square()`,
+   `which_grid_points()`, `snap_to_grid()`. Small, testable, no Stan
+   involvement.
+3. **§8 step 5 — the `deepRV()` formula term and `deeprv_brm()` wrapper.**
+   The reference shape is `benchmarks/vae/rstan/run_hmc.R`: that's the
+   prototype HMC call that produced the 42 s baseline. The package
+   version should:
+   - Build `stanvars` from a loaded decoder (weights as `data`, the
+     `decode` function in the `functions` block — `inst/stan/decode_mlp.stan`
+     is meant to be `paste()`'d in via `stanvar(block = "functions")`).
+   - Parse `deepRV(...)` terms out of the formula and rewrite to a
+     brms-acceptable form (see §2.3.5).
+   - Call `brms::brm()` with everything else passed through.
+   Start with the bare spatial case (no `by`, no `gr`, no Kronecker).
+
+### Open questions to batch back to the user
+
 - **CRAN strategy.** The package will ship 32 binary `.rds` files
   (~tens of MB total). CRAN's 5 MB tarball limit forces either a
   download-on-demand model (download from a GitHub release on first
@@ -804,3 +840,8 @@ Open questions to batch back to the user when they come up:
 - **Whose JAX version is the catalog frozen against?** Bumping JAX
   may shift weights below the 1e-5 forward-match tol; the
   `arch_version` field exists to gate this.
+- **Where does the brms boundary fall?** `deeprv_brm()` is described
+  as a thin wrapper, but the formula-rewrite path in §2.3.5 looks
+  load-bearing — confirm with the user whether to lean on
+  `brms::stanvars` for the data + function injection, or fork the
+  brms code-generation path.

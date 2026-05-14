@@ -1,0 +1,4 @@
+export(load_deeprv)
+export(load_deeprv_kron)
+S3method(print, deepRV_decoder)
+S3method(print, deepRV_decoder_kron)

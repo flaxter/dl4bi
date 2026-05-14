@@ -1,0 +1,23 @@
+Package: brms.deeprv
+Title: Pre-Trained Deep Random-Variate Decoders for 'brms'
+Version: 0.1.0.9000
+Authors@R:
+    person("Seth", "Flaxman", , "flaxter@gmail.com", role = c("aut", "cre"))
+Description: Companion to 'brms' that injects pre-trained MLPDeepRV
+    decoders as a 'deepRV()' formula term, giving Gaussian-process-like
+    spatial smooths at a fixed-grid for a small fraction of the cost of
+    an exact 'gp()' fit. Decoders are shipped per (domain, grid_size,
+    kernel) and validated by a SHA-256 fingerprint at load time. v0.1
+    targets the unit interval and (via Kronecker composition) the unit
+    square.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Imports:
+    digest,
+    jsonlite
+Suggests:
+    rstan,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3

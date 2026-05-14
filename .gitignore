@@ -26,4 +26,5 @@ tmp
 *.txt
 uv.lock
 *.rds
+!brms.deeprv/inst/extdata/decoders/*.rds
 benchmarks/vae/rstan/artifacts/
