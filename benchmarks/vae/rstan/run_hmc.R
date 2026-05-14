@@ -43,6 +43,7 @@ cat(sprintf("L=%d, n_obs=%d, truth: ls*=%.3f beta*=%+.3f\n",
             stan_data$L, sum(stan_data$obs_mask),
             truth$ls, truth$beta))
 
+t0 <- Sys.time()
 fit <- stan(
   file = here("mlp_decode.stan"),
   data = stan_data,
@@ -53,6 +54,7 @@ fit <- stan(
   refresh = 0,
   control = list(adapt_delta = 0.95)
 )
+wall <- as.numeric(Sys.time() - t0, units = "secs")
 
 print(fit, pars = c("beta", "ls"), probs = c(0.05, 0.5, 0.95))
 
@@ -66,3 +68,4 @@ cat(sprintf("ls:    truth=%+.3f   posterior mean=%+.3f   90%% CI %s\n",
 sp <- rstan::get_sampler_params(fit, inc_warmup = FALSE)
 ndiv <- sum(sapply(sp, function(s) sum(s[, "divergent__"])))
 cat(sprintf("\ndivergences (post-warmup): %d\n", ndiv))
+cat(sprintf("wall time (sampling + compile): %.1fs\n", wall))
