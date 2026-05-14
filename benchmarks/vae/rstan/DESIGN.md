@@ -742,23 +742,33 @@ Recommended order for the v0.1 build:
    is now "extend the parity test to cover every decoder in
    `configs/v0.1.yaml` once the catalog is trained."
 5. **`deepRV()` formula term + `deeprv_brm()` wrapper** — basic spatial only
-   (no `by`, no `gr`). Reuses `run_hmc.R` patterns. **MVP done.**
+   (no `by`, no `gr`). Reuses `run_hmc.R` patterns. **Done for v0.1.**
    `R/formula.R`: `deepRV(...)` is a marker that captures its arguments;
    `parse_deeprv_formula()` walks the RHS, extracting a single deepRV
    term and returning the residual. `R/priors.R`: `prior_uniform(lo, hi)`
    + `validate_prior_in_range()` (the section 2.3.3 "prior must fit the
    trained range" check). `R/stancode.R`: builds a complete Stan
    program inlining `inst/stan/decode_mlp.stan`'s functions block plus
-   data/parameters/transformed parameters/model blocks for the Poisson
-   MVP. `R/fit.R`: `deeprv_brm()` parses, validates, assembles standata,
-   compiles, and samples via `rstan::stan()`. MVP gate: one deepRV term,
-   intercept-only, Poisson, `prior_uniform` on ls. End-to-end test
-   fits a synthetic Poisson L=10 fixture in ~50 s (2 chains x 400 iter
-   on 2 cores) without errors or divergences. Per-feature gates in
-   `deeprv_brm()` reject `by`/`gr`/non-Poisson with clear messages so
-   the next agent knows exactly where to lift restrictions.
-6. **`posterior_predict.deepRV`, `conditional_effects.deepRV`** — minimal
-   versions for the basic spatial case. ~3 days.
+   data/parameters/transformed parameters/model blocks for the
+   Poisson or Gaussian family with an arbitrary fixed-effect design
+   matrix `X`. `R/fit.R`: `deeprv_brm()` parses, validates, builds
+   `model.matrix(~ rhs, data)`, assembles standata, compiles, and
+   samples via `rstan::stan()`. Remaining gates: `by`, `gr`,
+   `ls_pooling != "complete"`, families other than `poisson` /
+   `gaussian`. Each is a `stop()` in `deeprv_brm()` (search for the
+   reject messages) naming what to lift.
+6. **`posterior_predict.deepRV`, `conditional_effects.deepRV`** —
+   **posterior_predict / posterior_epred done.** `R/post_processing.R`:
+   `posterior_eta_draws()` is the underlying primitive (R-side batched
+   forward through the decoder, matches Stan's `mu` transformed
+   parameter to < 1e-4 in the test suite). `posterior_predict.deeprv_fit`
+   and `posterior_epred.deeprv_fit` register against the rstantools
+   generics so `posterior_predict(fit)` dispatches naturally after
+   `library(brms.deeprv)`. `newdata` is gated off in v0.1 with a
+   pointer to `brms::gp()` for new-location prediction.
+   `conditional_effects.deeprv_fit` (the plot of the posterior spatial
+   field) is the remaining piece of step 6 - probably <100 LOC since
+   the draws are already there.
 7. **`by = factor`, `by = numeric`, `ls_pooling`** — ~1 week.
 8. **`gr = TRUE`** — ~2 days.
 9. **`load_deeprv_kron()`, `deepRV()` accepting `deepRV_decoder_kron`** —

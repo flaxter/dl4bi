@@ -9,12 +9,15 @@ deeprv_brm(formula, data, family = stats::poisson(),
 }
 \arguments{
 \item{formula}{A formula of the form
-\code{y ~ deepRV(s, decoder = ..., obs_idx = ..., ls_prior = ...)}.}
+\code{y ~ <covariates> + deepRV(s, decoder = ..., obs_idx = ...,
+ls_prior = ...)}. RHS covariates are passed through
+\code{model.matrix()} with the usual rules (intercept on by default).}
 
-\item{data}{A data frame containing the response and any columns
-referenced inside \code{deepRV(...)}.}
+\item{data}{A data frame containing the response, any RHS columns,
+and any columns referenced inside \code{deepRV(...)}.}
 
-\item{family}{A family object. Only \code{poisson()} is supported in MVP.}
+\item{family}{A family object. \code{poisson()} and \code{gaussian()}
+are supported.}
 
 \item{chains, iter, warmup, seed, cores, control}{Forwarded to
 \code{rstan::stan()}.}
@@ -22,18 +25,20 @@ referenced inside \code{deepRV(...)}.}
 \item{...}{Caught and rejected for now (no \code{brms} passthrough yet).}
 }
 \value{
-A \code{deeprv_fit} object containing the \code{stanfit}, the generated
-Stan code, the standata, and the parsed \code{deepRV_call}.
+A \code{deeprv_fit} object containing the \code{stanfit}, the
+generated Stan code, the standata, the parsed \code{deepRV_call}, and
+the design matrix \code{X} (for downstream prediction).
 }
 \description{
-MVP scope:
+Supported v0.1 surface:
 \itemize{
   \item Exactly one \code{deepRV()} term in the formula.
-  \item Intercept-only fixed effects (no covariates other than the
-    decoder term).
-  \item Poisson family.
+  \item Any RHS covariates handled via \code{model.matrix(~ rhs, data)}.
+    Coefficient vector \code{b} gets a default N(0, 1) prior.
+  \item \code{family} in \code{poisson()} or \code{gaussian()}.
   \item \code{\link{prior_uniform}} on the length-scale.
 }
-Each of these restrictions is checked at the top of \code{deeprv_brm()}
-and lifts in a follow-on commit.
+The \code{by} / \code{gr} / \code{ls_pooling} knobs are reserved for
+v0.2 and error if non-default.
 }
+

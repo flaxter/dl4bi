@@ -1,29 +1,29 @@
 #' Fit a deepRV-augmented brms-style model
 #'
-#' MVP scope:
+#' Supported v0.1 surface:
 #' \itemize{
 #'   \item Exactly one `deepRV()` term in the formula.
-#'   \item Intercept-only fixed effects (no covariates other than the
-#'     decoder term).
-#'   \item Poisson family.
+#'   \item Any RHS covariates handled via `model.matrix(~ rhs, data)`.
+#'     Coefficient vector `b` gets a default N(0, 1) prior.
+#'   \item `family` in `poisson()` or `gaussian()`.
 #'   \item `prior_uniform()` on the length-scale.
 #' }
-#' Each of these restrictions is checked at the top of `deeprv_brm()`
-#' and lifts in a follow-on. The wider `by` / `gr` / `ls_pooling`
-#' / fixed-effects / family surface is documented in DESIGN.md sections
-#' 2.3 and 2.4.
+#' The `by` / `gr` / `ls_pooling` knobs are reserved for v0.2 and
+#' error if non-default.
 #'
-#' @param formula A formula of the form `y ~ deepRV(s, decoder = ...,
-#'   obs_idx = ..., ls_prior = ...)`.
-#' @param data A data frame containing the response and any columns
-#'   referenced inside `deepRV(...)`.
-#' @param family A family object. Only `poisson()` is supported in MVP.
+#' @param formula A formula of the form `y ~ <covariates> +
+#'   deepRV(s, decoder = ..., obs_idx = ..., ls_prior = ...)`.
+#' @param data A data frame containing the response, any RHS columns,
+#'   and any columns referenced inside `deepRV(...)`.
+#' @param family A family object. `poisson()` and `gaussian()` are
+#'   supported.
 #' @param chains,iter,warmup,seed,cores,control Forwarded to
-#'   [rstan::sampling()].
+#'   `rstan::stan()`.
 #' @param ... Caught and rejected for now (no brms passthrough yet).
 #'
 #' @return A `deeprv_fit` object containing the `stanfit`, the
-#'   generated Stan code, the standata, and the parsed `deepRV_call`.
+#'   generated Stan code, the standata, the parsed `deepRV_call`,
+#'   and the design matrix `X` for downstream prediction.
 #'
 #' @export
 deeprv_brm <- function(formula, data, family = stats::poisson(),
@@ -33,7 +33,7 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
                        ...) {
   extra <- list(...)
   if (length(extra) > 0L) {
-    stop("MVP deeprv_brm() doesn't accept additional arguments yet. ",
+    stop("deeprv_brm() doesn't accept additional arguments yet. ",
          sprintf("Got: %s", paste(names(extra), collapse = ", ")),
          call. = FALSE)
   }
@@ -42,28 +42,22 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
          call. = FALSE)
   }
   fam <- as_family(family)
-  if (!identical(fam$family, "poisson")) {
-    stop("MVP supports family = poisson() only; got: ",
-         fam$family, call. = FALSE)
+  if (!(fam$family %in% c("poisson", "gaussian"))) {
+    stop("supported families: poisson, gaussian; got: ", fam$family,
+         call. = FALSE)
   }
 
   parsed <- parse_deeprv_formula(formula, data, envir = parent.frame())
   dr_call <- parsed$deepRV[[1L]]
-  if (!is.null(parsed$rhs)) {
-    stop("MVP only supports an intercept and one deepRV() term. ",
-         "Additional fixed effects on the RHS aren't wired up yet: ",
-         deparse(parsed$rhs), call. = FALSE)
-  }
-  # Reject the v0.2 knobs explicitly so users get a clear error.
   if (!is.null(dr_call$by)) {
-    stop("MVP: deepRV(by = ...) is reserved for a follow-up. Drop the ",
+    stop("deepRV(by = ...) is reserved for a follow-up. Drop the ",
          "`by` argument to fit a single shared field.", call. = FALSE)
   }
   if (!isFALSE(dr_call$gr)) {
-    stop("MVP: deepRV(gr = TRUE) is reserved for a follow-up", call. = FALSE)
+    stop("deepRV(gr = TRUE) is reserved for a follow-up", call. = FALSE)
   }
   if (!identical(dr_call$ls_pooling, "complete")) {
-    stop("MVP: deepRV(ls_pooling = ...) only supports the default \"complete\"",
+    stop("deepRV(ls_pooling = ...) only supports the default \"complete\"",
          call. = FALSE)
   }
 
@@ -78,8 +72,10 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
 
   y <- eval(parsed$lhs, envir = data, enclos = parent.frame())
 
-  stancode <- build_stancode(decoder, dr_call$ls_prior, family = "poisson")
-  standata <- build_standata(decoder, dr_call, y)
+  X <- build_design_matrix(parsed$rhs, data)
+
+  stancode <- build_stancode(decoder, dr_call$ls_prior, family = fam$family)
+  standata <- build_standata(decoder, dr_call, y, X, family = fam$family)
 
   sampling_args <- list(
     model_code = stancode,
@@ -100,7 +96,8 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
     standata = standata,
     decoder  = decoder,
     deepRV   = dr_call,
-    family   = fam
+    family   = fam,
+    X        = X
   )
   class(out) <- c("deeprv_fit", "list")
   out
@@ -112,15 +109,15 @@ print.deeprv_fit <- function(x, ...) {
   cat(sprintf("  decoder : %s grid=%d kernel=%s\n",
               x$decoder$domain, x$decoder$grid_size, x$decoder$kernel))
   cat(sprintf("  family  : %s\n", x$family$family))
-  cat(sprintf("  N       : %d   L : %d\n",
-              x$standata$N, x$standata$L))
-  cat("  stanfit summary (beta0, ls):\n")
-  print(x$stanfit, pars = c("beta0", "ls"), probs = c(0.05, 0.5, 0.95))
+  cat(sprintf("  N       : %d   L : %d   K : %d\n",
+              x$standata$N, x$standata$L, x$standata$K))
+  pars <- c("b", "ls")
+  if (x$family$family == "gaussian") pars <- c(pars, "sigma")
+  cat("  stanfit summary:\n")
+  print(x$stanfit, pars = pars, probs = c(0.05, 0.5, 0.95))
   invisible(x)
 }
 
-# Normalize family inputs: accept the family object, a string, or a
-# function returning a family.
 as_family <- function(family) {
   if (inherits(family, "family")) return(family)
   if (is.function(family))        return(family())
@@ -130,4 +127,24 @@ as_family <- function(family) {
 
 decoder_label <- function(dr) {
   sprintf("%s/grid_size=%d/kernel=%s", dr$domain, dr$grid_size, dr$kernel)
+}
+
+# Turn the residual RHS of a formula into a numeric design matrix. If
+# the residual is NULL (no covariates beyond the deepRV() term), defaults
+# to an intercept-only matrix of 1's.
+#
+# Uses model.matrix's standard rules: an intercept is included by default
+# unless the user wrote `... - 1` or `... + 0`.
+build_design_matrix <- function(rhs_expr, data) {
+  if (is.null(rhs_expr)) {
+    rhs_formula <- ~1
+  } else {
+    rhs_formula <- stats::reformulate(deparse(rhs_expr, width.cutoff = 500L))
+  }
+  mf <- stats::model.frame(rhs_formula, data = data, na.action = stats::na.fail)
+  X <- stats::model.matrix(rhs_formula, mf)
+  # Drop the model.matrix dimnames since Stan doesn't care; keep colnames
+  # for downstream posterior_predict but not the row names (memory).
+  rownames(X) <- NULL
+  X
 }

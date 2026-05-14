@@ -1,15 +1,15 @@
-# Build the full Stan source for an MVP deepRV model. The MVP is
-# constrained to:
+# Build the Stan source for a deepRV model. Supported v0.1 surface:
 #   - exactly one deepRV() term
-#   - intercept-only fixed effects (no covariates)
-#   - Poisson family
-#   - prior_uniform on ls
-# Each restriction lifts in a follow-on commit; the check is in
-# deeprv_brm() so this codegen can be reused.
+#   - fixed-effect design matrix X built from the formula RHS minus
+#     the deepRV() term (intercept included by default)
+#   - prior_uniform on ls; default N(0, 1) on b; default half-normal(0, 1)
+#     on sigma (gaussian only)
+#   - family in {poisson, gaussian}
 #
-# The decoder's `decode` function source is loaded from
-# inst/stan/decode_mlp.stan and inlined verbatim - keeping that file
-# the single source of truth for the forward pass.
+# Each branch lives in one place: family-specific bits in build_stancode()
+# and build_standata(); shared shape checks in standata. The decoder's
+# decode function source is inlined verbatim from inst/stan/decode_mlp.stan
+# so that file is the single source of truth.
 
 read_decode_functions_block <- function() {
   path <- system.file("stan", "decode_mlp.stan", package = "brms.deeprv")
@@ -18,73 +18,92 @@ read_decode_functions_block <- function() {
          call. = FALSE)
   }
   src <- paste(readLines(path, warn = FALSE), collapse = "\n")
-  # decode_mlp.stan has a single `functions { ... }` block plus header
-  # comments. Strip the wrapping braces so we can splice into the body
-  # of a larger `functions { }` block in the generated program.
   m <- regmatches(src, regexpr("functions\\s*\\{[\\s\\S]*\\}", src, perl = TRUE))
   if (length(m) != 1L) {
     stop("could not locate `functions { ... }` block in decode_mlp.stan",
          call. = FALSE)
   }
-  # Drop the leading "functions {" and trailing "}".
   inner <- sub("^functions\\s*\\{", "", m)
   inner <- sub("\\}\\s*$", "", inner)
   trimws(inner)
 }
 
-# Build the Stan program string. The caller is responsible for passing
-# a validated decoder + prior; we just stitch the templates here.
+# Family-specific Stan snippets. Each entry is a list of fragments that
+# get spliced into the appropriate Stan blocks.
+family_spec <- function(family_name) {
+  switch(family_name,
+    poisson = list(
+      y_decl    = "  array[N] int<lower=0> y;",
+      extra_par = NULL,
+      extra_prior = NULL,
+      likelihood = "  target += poisson_log_lpmf(y | X * b + mu[obs_idx]);"
+    ),
+    gaussian = list(
+      y_decl    = "  vector[N] y;",
+      extra_par = "  real<lower=0> sigma;",
+      extra_prior = "  sigma ~ std_normal();",
+      likelihood = "  target += normal_lpdf(y | X * b + mu[obs_idx], sigma);"
+    ),
+    stop(sprintf("unsupported family: %s", family_name), call. = FALSE)
+  )
+}
+
+# Build the full Stan program. ls_prior may be NULL for the (future)
+# case where ls has no user prior; for now prior_uniform is required.
 build_stancode <- function(decoder, ls_prior, family) {
-  stopifnot(family == "poisson")
   stopifnot(inherits(ls_prior, "deepRV_prior"))
   stopifnot(ls_prior$family == "uniform")
-
+  fs <- family_spec(family)
   decode_body <- read_decode_functions_block()
   ls_lo <- sprintf("%.10g", ls_prior$lower)
   ls_hi <- sprintf("%.10g", ls_prior$upper)
 
-  sprintf(
-    paste(
-      "functions {",
-      "%s",
-      "}",
-      "data {",
-      "  int<lower=1> N;",
-      "  int<lower=1> L;",
-      "  int<lower=1> cond_dim;",
-      "  int<lower=1> hidden;",
-      "  matrix[L + cond_dim, hidden] W1;",
-      "  vector[hidden]               b1;",
-      "  matrix[hidden, L]            W2;",
-      "  vector[L]                    b2;",
-      "  array[N] int<lower=0>           y;",
-      "  array[N] int<lower=1, upper=L>  obs_idx;",
-      "}",
-      "parameters {",
-      "  vector[L] z;",
-      "  real<lower=%s, upper=%s> ls;",
-      "  real beta0;",
-      "}",
-      "transformed parameters {",
-      "  vector[cond_dim] cond;",
-      "  cond[1] = ls;",
-      "  vector[L] mu = decode(z, cond, W1, b1, W2, b2);",
-      "}",
-      "model {",
-      "  z ~ std_normal();",
-      "  beta0 ~ std_normal();",
-      "  // ls ~ uniform(%s, %s)  -- implicit from parameter bounds",
-      "  target += poisson_log_lpmf(y | beta0 + mu[obs_idx]);",
-      "}",
-      sep = "\n"
-    ),
-    decode_body, ls_lo, ls_hi, ls_lo, ls_hi
+  lines <- c(
+    "functions {",
+    decode_body,
+    "}",
+    "data {",
+    "  int<lower=1> N;",
+    "  int<lower=1> L;",
+    "  int<lower=1> cond_dim;",
+    "  int<lower=1> hidden;",
+    "  int<lower=1> K;",
+    "  matrix[N, K] X;",
+    "  matrix[L + cond_dim, hidden] W1;",
+    "  vector[hidden]               b1;",
+    "  matrix[hidden, L]            W2;",
+    "  vector[L]                    b2;",
+    fs$y_decl,
+    "  array[N] int<lower=1, upper=L>  obs_idx;",
+    "}",
+    "parameters {",
+    "  vector[L] z;",
+    sprintf("  real<lower=%s, upper=%s> ls;", ls_lo, ls_hi),
+    "  vector[K] b;",
+    fs$extra_par,
+    "}",
+    "transformed parameters {",
+    "  vector[cond_dim] cond;",
+    "  cond[1] = ls;",
+    "  vector[L] mu = decode(z, cond, W1, b1, W2, b2);",
+    "}",
+    "model {",
+    "  z ~ std_normal();",
+    "  b ~ std_normal();",
+    fs$extra_prior,
+    sprintf("  // ls ~ uniform(%s, %s)  -- implicit from parameter bounds",
+            ls_lo, ls_hi),
+    fs$likelihood,
+    "}"
   )
+  paste(Filter(Negate(is.null), lines), collapse = "\n")
 }
 
-# Build the Stan data list from a decoder + the parsed deepRV term +
-# the response vector y. Aborts on any shape mismatch.
-build_standata <- function(decoder, deepRV_call, y) {
+# Build the standata list. Handles:
+#   - obs_idx range and length checks
+#   - family-specific y type coercion
+#   - design matrix X (defaults to intercept-only if rhs_formula is NULL)
+build_standata <- function(decoder, deepRV_call, y, X, family) {
   obs_idx <- as.integer(deepRV_call$obs_idx)
   if (length(obs_idx) != length(y)) {
     stop(sprintf(
@@ -101,19 +120,46 @@ build_standata <- function(decoder, deepRV_call, y) {
       if (any(is.na(obs_idx))) " (with NAs)" else ""),
       call. = FALSE)
   }
-  if (!is.numeric(y) || any(y < 0) || any(y != round(y))) {
-    stop("Poisson family requires non-negative integer y", call. = FALSE)
+  if (!is.matrix(X) || nrow(X) != length(y)) {
+    stop(sprintf("design matrix X must have nrow == length(y); got %s x %d vs %d",
+                 paste(dim(X), collapse = "x"), ncol(X), length(y)),
+         call. = FALSE)
   }
+  if (ncol(X) < 1L) {
+    stop("design matrix X must have at least one column", call. = FALSE)
+  }
+  if (any(is.na(X))) {
+    stop("design matrix X contains NAs; drop or impute incomplete rows first",
+         call. = FALSE)
+  }
+
+  y_data <- switch(family,
+    poisson = {
+      if (!is.numeric(y) || any(y < 0) || any(y != round(y))) {
+        stop("Poisson family requires non-negative integer y", call. = FALSE)
+      }
+      as.integer(y)
+    },
+    gaussian = {
+      if (!is.numeric(y)) stop("Gaussian family requires numeric y", call. = FALSE)
+      if (any(is.na(y))) stop("y contains NAs", call. = FALSE)
+      as.numeric(y)
+    },
+    stop(sprintf("unsupported family: %s", family), call. = FALSE)
+  )
+
   list(
     N        = length(y),
     L        = as.integer(decoder$L),
     cond_dim = length(decoder$conditionals),
     hidden   = ncol(decoder$weights$W1),
+    K        = ncol(X),
+    X        = X,
     W1       = decoder$weights$W1,
     b1       = as.array(decoder$weights$b1),
     W2       = decoder$weights$W2,
     b2       = as.array(decoder$weights$b2),
-    y        = as.integer(y),
+    y        = y_data,
     obs_idx  = obs_idx
   )
 }
