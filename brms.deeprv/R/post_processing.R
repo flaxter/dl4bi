@@ -31,6 +31,12 @@ posterior_eta_draws <- function(fit) {
   # b (S, K) x t(X) (K, N) -> (S, N)
   fixed <- b %*% t(X)
   spatial <- mu_full[, obs_idx, drop = FALSE]           # (S, N)
+  by_mode <- if (is.null(fit$by_mode)) "none" else fit$by_mode
+  if (by_mode == "svc") {
+    # Element-wise multiply each column of spatial by the corresponding
+    # x_by[n] - matches the Stan likelihood's `x_by .* mu[obs_idx]`.
+    spatial <- sweep(spatial, 2L, as.numeric(fit$by_values), FUN = "*")
+  }
   fixed + spatial
 }
 

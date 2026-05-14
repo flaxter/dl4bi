@@ -49,10 +49,7 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
 
   parsed <- parse_deeprv_formula(formula, data, envir = parent.frame())
   dr_call <- parsed$deepRV[[1L]]
-  if (!is.null(dr_call$by)) {
-    stop("deepRV(by = ...) is reserved for a follow-up. Drop the ",
-         "`by` argument to fit a single shared field.", call. = FALSE)
-  }
+  by_info <- classify_by(dr_call$by)
   if (!isFALSE(dr_call$gr)) {
     stop("deepRV(gr = TRUE) is reserved for a follow-up", call. = FALSE)
   }
@@ -74,8 +71,18 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
 
   X <- build_design_matrix(parsed$rhs, data)
 
-  stancode <- build_stancode(decoder, dr_call$ls_prior, family = fam$family)
-  standata <- build_standata(decoder, dr_call, y, X, family = fam$family)
+  if (by_info$mode == "svc" && length(by_info$values) != length(y)) {
+    stop(sprintf(
+      "deepRV(by = ...) numeric vector length (%d) must match nrow(data) (%d)",
+      length(by_info$values), length(y)),
+      call. = FALSE)
+  }
+
+  stancode <- build_stancode(decoder, dr_call$ls_prior, family = fam$family,
+                             by_mode = by_info$mode)
+  standata <- build_standata(decoder, dr_call, y, X, family = fam$family,
+                             by_mode = by_info$mode,
+                             by_values = by_info$values)
 
   sampling_args <- list(
     model_code = stancode,
@@ -97,10 +104,33 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
     decoder  = decoder,
     deepRV   = dr_call,
     family   = fam,
-    X        = X
+    X        = X,
+    by_mode  = by_info$mode,
+    by_values = by_info$values
   )
   class(out) <- c("deeprv_fit", "list")
   out
+}
+
+# Classify the deepRV(..., by = ...) value:
+#   NULL           -> mode = "none"
+#   numeric vector -> mode = "svc"     (spatially varying coefficient)
+#   factor/char    -> stop pending the by = factor lift
+classify_by <- function(by_val) {
+  if (is.null(by_val)) {
+    return(list(mode = "none", values = NULL))
+  }
+  if (is.numeric(by_val) && !is.factor(by_val)) {
+    return(list(mode = "svc", values = as.numeric(by_val)))
+  }
+  if (is.factor(by_val) || is.character(by_val)) {
+    stop("deepRV(by = <factor/character>) for group-specific smooths ",
+         "is reserved for a follow-up. Currently only by = NULL (single ",
+         "shared field) and by = <numeric vector> (SVC) are supported.",
+         call. = FALSE)
+  }
+  stop("deepRV(by = ...) must be NULL, a numeric vector, or a factor",
+       call. = FALSE)
 }
 
 #' @export

@@ -757,19 +757,25 @@ Recommended order for the v0.1 build:
    `ls_pooling != "complete"`, families other than `poisson` /
    `gaussian`. Each is a `stop()` in `deeprv_brm()` (search for the
    reject messages) naming what to lift.
-6. **`posterior_predict.deepRV`, `conditional_effects.deepRV`** —
-   **posterior_predict / posterior_epred done.** `R/post_processing.R`:
-   `posterior_eta_draws()` is the underlying primitive (R-side batched
-   forward through the decoder, matches Stan's `mu` transformed
-   parameter to < 1e-4 in the test suite). `posterior_predict.deeprv_fit`
-   and `posterior_epred.deeprv_fit` register against the rstantools
-   generics so `posterior_predict(fit)` dispatches naturally after
-   `library(brms.deeprv)`. `newdata` is gated off in v0.1 with a
-   pointer to `brms::gp()` for new-location prediction.
-   `conditional_effects.deeprv_fit` (the plot of the posterior spatial
-   field) is the remaining piece of step 6 - probably <100 LOC since
-   the draws are already there.
-7. **`by = factor`, `by = numeric`, `ls_pooling`** — ~1 week.
+6. ~~**`posterior_predict.deepRV`, `conditional_effects.deepRV`**~~ —
+   **done for v0.1.** `R/post_processing.R`: `posterior_eta_draws()`
+   is the underlying primitive (R-side batched forward, matches
+   Stan's `mu` to < 1e-4). `posterior_predict.deeprv_fit` and
+   `posterior_epred.deeprv_fit` register against the rstantools
+   generics. `R/conditional_effects.R`: `conditional_effects()` is a
+   local generic (no brms dep) returning a data frame per deepRV term
+   with `(grid_index, s, estimate, lower, upper)`; ships with a
+   base-graphics `plot()` method (line + CI ribbon). 2D Kronecker
+   heatmap deferred to v0.2 along with the Kronecker fit path.
+7. **`by = factor`, `by = numeric`, `ls_pooling`** —
+   **`by = numeric` (SVC) done.** Single decoder; Stan likelihood
+   uses `x_by .* mu[obs_idx]`. `R/fit.R::classify_by()` routes by
+   `is.numeric()`. `R/stancode.R` factors the spatial term through a
+   `by_mode` argument (`"none"` / `"svc"`). Remaining: `by = factor`
+   (matrix `z`, vector `ls`, group-indexed contributions) and
+   `ls_pooling` variants. `R/post_processing.R::posterior_eta_draws()`
+   already handles the SVC multiplier so post-processing carries
+   forward unchanged for `by = factor` once that lands.
 8. **`gr = TRUE`** — ~2 days.
 9. **`load_deeprv_kron()`, `deepRV()` accepting `deepRV_decoder_kron`** —
    Stan code path for the Kronecker composition. ~1 week.

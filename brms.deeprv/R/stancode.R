@@ -28,21 +28,30 @@ read_decode_functions_block <- function() {
   trimws(inner)
 }
 
-# Family-specific Stan snippets. Each entry is a list of fragments that
-# get spliced into the appropriate Stan blocks.
-family_spec <- function(family_name) {
+# Family-specific Stan snippets. The `by_mode` controls the form of the
+# spatial term inside the likelihood:
+#   "none" -> mu[obs_idx]
+#   "svc"  -> x_by .* mu[obs_idx]    (element-wise SVC)
+family_spec <- function(family_name, by_mode = "none") {
+  spatial_term <- switch(by_mode,
+    none = "mu[obs_idx]",
+    svc  = "x_by .* mu[obs_idx]",
+    stop(sprintf("unknown by_mode: %s", by_mode), call. = FALSE)
+  )
   switch(family_name,
     poisson = list(
       y_decl    = "  array[N] int<lower=0> y;",
       extra_par = NULL,
       extra_prior = NULL,
-      likelihood = "  target += poisson_log_lpmf(y | X * b + mu[obs_idx]);"
+      likelihood = sprintf("  target += poisson_log_lpmf(y | X * b + %s);",
+                           spatial_term)
     ),
     gaussian = list(
       y_decl    = "  vector[N] y;",
       extra_par = "  real<lower=0> sigma;",
       extra_prior = "  sigma ~ std_normal();",
-      likelihood = "  target += normal_lpdf(y | X * b + mu[obs_idx], sigma);"
+      likelihood = sprintf("  target += normal_lpdf(y | X * b + %s, sigma);",
+                           spatial_term)
     ),
     stop(sprintf("unsupported family: %s", family_name), call. = FALSE)
   )
@@ -50,13 +59,19 @@ family_spec <- function(family_name) {
 
 # Build the full Stan program. ls_prior may be NULL for the (future)
 # case where ls has no user prior; for now prior_uniform is required.
-build_stancode <- function(decoder, ls_prior, family) {
+#
+# by_mode controls how the decoder's mu contributes to eta:
+#   "none" : eta_n = X[n,:] %*% b + mu[obs_idx[n]]                  (default)
+#   "svc"  : eta_n = X[n,:] %*% b + x_by[n] * mu[obs_idx[n]]        (SVC)
+build_stancode <- function(decoder, ls_prior, family, by_mode = "none") {
   stopifnot(inherits(ls_prior, "deepRV_prior"))
   stopifnot(ls_prior$family == "uniform")
-  fs <- family_spec(family)
+  stopifnot(by_mode %in% c("none", "svc"))
+  fs <- family_spec(family, by_mode)
   decode_body <- read_decode_functions_block()
   ls_lo <- sprintf("%.10g", ls_prior$lower)
   ls_hi <- sprintf("%.10g", ls_prior$upper)
+  extra_data <- if (by_mode == "svc") "  vector[N] x_by;" else NULL
 
   lines <- c(
     "functions {",
@@ -75,6 +90,7 @@ build_stancode <- function(decoder, ls_prior, family) {
     "  vector[L]                    b2;",
     fs$y_decl,
     "  array[N] int<lower=1, upper=L>  obs_idx;",
+    extra_data,
     "}",
     "parameters {",
     "  vector[L] z;",
@@ -103,7 +119,9 @@ build_stancode <- function(decoder, ls_prior, family) {
 #   - obs_idx range and length checks
 #   - family-specific y type coercion
 #   - design matrix X (defaults to intercept-only if rhs_formula is NULL)
-build_standata <- function(decoder, deepRV_call, y, X, family) {
+#   - by_values for SVC (passed in as `x_by`)
+build_standata <- function(decoder, deepRV_call, y, X, family,
+                           by_mode = "none", by_values = NULL) {
   obs_idx <- as.integer(deepRV_call$obs_idx)
   if (length(obs_idx) != length(y)) {
     stop(sprintf(
@@ -148,7 +166,7 @@ build_standata <- function(decoder, deepRV_call, y, X, family) {
     stop(sprintf("unsupported family: %s", family), call. = FALSE)
   )
 
-  list(
+  out <- list(
     N        = length(y),
     L        = as.integer(decoder$L),
     cond_dim = length(decoder$conditionals),
@@ -162,4 +180,12 @@ build_standata <- function(decoder, deepRV_call, y, X, family) {
     y        = y_data,
     obs_idx  = obs_idx
   )
+  if (by_mode == "svc") {
+    if (is.null(by_values) || length(by_values) != length(y)) {
+      stop("by_values must have the same length as y for SVC mode",
+           call. = FALSE)
+    }
+    out$x_by <- as.numeric(by_values)
+  }
+  out
 }
