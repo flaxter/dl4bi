@@ -62,15 +62,20 @@ family_spec <- function(family_name, by_mode = "none") {
 # Build the full Stan program. Dispatches to the Kronecker codepath
 # when given a deepRV_decoder_kron; otherwise falls through to the 1D
 # build below.
-build_stancode <- function(decoder, ls_prior, family, by_mode = "none") {
+build_stancode <- function(decoder, ls_prior, family, by_mode = "none",
+                           ls_pooling = "complete") {
   if (inherits(decoder, "deepRV_decoder_kron")) {
     if (by_mode != "none") {
       stop("by != NULL is not supported with Kronecker decoders in v0.1",
            call. = FALSE)
     }
+    if (ls_pooling != "complete") {
+      stop("ls_pooling != \"complete\" is not supported with Kronecker ",
+           "decoders in v0.1.", call. = FALSE)
+    }
     return(build_stancode_kron(decoder, ls_prior, family))
   }
-  build_stancode_1d(decoder, ls_prior, family, by_mode)
+  build_stancode_1d(decoder, ls_prior, family, by_mode, ls_pooling)
 }
 
 # Build the 1D Stan program. ls_prior may be NULL for the (future)
@@ -80,11 +85,25 @@ build_stancode <- function(decoder, ls_prior, family, by_mode = "none") {
 #   "none"   : eta_n = X[n,:] %*% b + mu[obs_idx[n]]                  (default)
 #   "svc"    : eta_n = X[n,:] %*% b + x_by[n] * mu[obs_idx[n]]        (SVC)
 #   "factor" : matrix[G, L] z; matrix[G, L] mu; eta_n adds
-#              mu[group_idx[n], obs_idx[n]]. Single shared ls.
-build_stancode_1d <- function(decoder, ls_prior, family, by_mode = "none") {
+#              mu[group_idx[n], obs_idx[n]].
+#
+# ls_pooling applies only when by_mode = "factor":
+#   "complete" : real ls (single, shared)
+#   "none"     : vector[G] ls (independent, each gets the same uniform prior)
+#   "partial"  : vector[G] ls drawn from N(mu_ls, tau_ls^2) truncated to the
+#                trained range; mu_ls inherits the ls_prior bounds, tau_ls has
+#                a half-normal(0, 0.5) default.
+build_stancode_1d <- function(decoder, ls_prior, family, by_mode = "none",
+                              ls_pooling = "complete") {
   stopifnot(inherits(ls_prior, "deepRV_prior"))
   stopifnot(ls_prior$family == "uniform")
   stopifnot(by_mode %in% c("none", "svc", "factor"))
+  stopifnot(ls_pooling %in% c("complete", "none", "partial"))
+  if (by_mode != "factor" && ls_pooling != "complete") {
+    stop("ls_pooling is only meaningful with by = <factor>; ",
+         "non-default ls_pooling values are rejected otherwise",
+         call. = FALSE)
+  }
   fs <- family_spec(family, by_mode)
   decode_body <- read_decode_functions_block()
   ls_lo <- sprintf("%.10g", ls_prior$lower)
@@ -101,14 +120,44 @@ build_stancode_1d <- function(decoder, ls_prior, family, by_mode = "none") {
   if (by_mode == "factor") {
     z_par <- "  matrix[G, L] z;"
     z_prior <- "  to_vector(z) ~ std_normal();"
-    mu_block <- c(
-      "  vector[cond_dim] cond;",
-      "  cond[1] = ls;",
-      "  matrix[G, L] mu;",
-      "  for (g in 1:G)",
-      "    mu[g] = decode(to_vector(z[g]), cond, W1, b1, W2, b2)';"
+    # ls is scalar for "complete", vector[G] otherwise.
+    ls_par <- switch(ls_pooling,
+      complete = sprintf("  real<lower=%s, upper=%s> ls;", ls_lo, ls_hi),
+      none     = sprintf("  vector<lower=%s, upper=%s>[G] ls;", ls_lo, ls_hi),
+      partial  = c(
+        sprintf("  vector<lower=%s, upper=%s>[G] ls;", ls_lo, ls_hi),
+        sprintf("  real<lower=%s, upper=%s> mu_ls;", ls_lo, ls_hi),
+        "  real<lower=0> tau_ls;"
+      )
     )
-    # Stan needs the spatial vector built before it's used in the likelihood.
+    # Decode loop. For ls_pooling != "complete" the conditional changes
+    # per group, so we set cond[1] inside the loop.
+    if (ls_pooling == "complete") {
+      mu_block <- c(
+        "  vector[cond_dim] cond;",
+        "  cond[1] = ls;",
+        "  matrix[G, L] mu;",
+        "  for (g in 1:G)",
+        "    mu[g] = decode(to_vector(z[g]), cond, W1, b1, W2, b2)';"
+      )
+    } else {
+      mu_block <- c(
+        "  matrix[G, L] mu;",
+        "  for (g in 1:G) {",
+        "    vector[cond_dim] cond_g;",
+        "    cond_g[1] = ls[g];",
+        "    mu[g] = decode(to_vector(z[g]), cond_g, W1, b1, W2, b2)';",
+        "  }"
+      )
+    }
+    extra_ls_prior <- switch(ls_pooling,
+      complete = NULL,
+      none     = NULL,    # implicit uniform from element-wise bounds
+      partial  = c(
+        "  ls ~ normal(mu_ls, tau_ls);  // truncated by element-wise bounds",
+        "  tau_ls ~ normal(0, 0.5);     // default half-normal(0, 0.5)"
+      )
+    )
     pre_likelihood <- c(
       "  vector[N] spatial;",
       "  for (n in 1:N) spatial[n] = mu[group_idx[n], obs_idx[n]];"
@@ -116,11 +165,13 @@ build_stancode_1d <- function(decoder, ls_prior, family, by_mode = "none") {
   } else {
     z_par <- "  vector[L] z;"
     z_prior <- "  z ~ std_normal();"
+    ls_par <- sprintf("  real<lower=%s, upper=%s> ls;", ls_lo, ls_hi)
     mu_block <- c(
       "  vector[cond_dim] cond;",
       "  cond[1] = ls;",
       "  vector[L] mu = decode(z, cond, W1, b1, W2, b2);"
     )
+    extra_ls_prior <- NULL
     pre_likelihood <- NULL
   }
 
@@ -145,7 +196,7 @@ build_stancode_1d <- function(decoder, ls_prior, family, by_mode = "none") {
     "}",
     "parameters {",
     z_par,
-    sprintf("  real<lower=%s, upper=%s> ls;", ls_lo, ls_hi),
+    ls_par,
     "  vector[K] b;",
     fs$extra_par,
     "}",
@@ -156,6 +207,7 @@ build_stancode_1d <- function(decoder, ls_prior, family, by_mode = "none") {
     z_prior,
     "  b ~ std_normal();",
     fs$extra_prior,
+    extra_ls_prior,
     sprintf("  // ls ~ uniform(%s, %s)  -- implicit from parameter bounds",
             ls_lo, ls_hi),
     pre_likelihood,

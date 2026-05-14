@@ -159,23 +159,45 @@ test_that("deeprv_brm() supports gaussian() family", {
   expect_true(all(sigma_draws > 0))
 })
 
-test_that("deeprv_brm() rejects remaining v0.2 knobs and unsupported families", {
+test_that("deeprv_brm() accepts gr = TRUE as a no-op", {
+  skip_if_no_rstan()
+  skip_on_cran()
+
+  fix <- make_poisson_fixture()
+  # Same fixture, fit with gr = FALSE and gr = TRUE - both should produce
+  # bit-identical Stan code since the package always operates in the
+  # gr-equivalent mode (one decode per draw, gather via obs_idx).
+  fit_off <- deeprv_brm(
+    y ~ deepRV(s, decoder = fix$dr, obs_idx = obs_idx,
+               ls_prior = prior_uniform(0.05, 0.5), gr = FALSE),
+    data = fix$df, family = poisson(),
+    chains = 1L, iter = 100L, warmup = 50L, seed = 1L, cores = 1L
+  )
+  fit_on <- deeprv_brm(
+    y ~ deepRV(s, decoder = fix$dr, obs_idx = obs_idx,
+               ls_prior = prior_uniform(0.05, 0.5), gr = TRUE),
+    data = fix$df, family = poisson(),
+    chains = 1L, iter = 100L, warmup = 50L, seed = 1L, cores = 1L
+  )
+  expect_identical(fit_off$stancode, fit_on$stancode)
+})
+
+test_that("deeprv_brm() rejects unsupported families", {
   dr <- load_deeprv("unit_interval", grid_size = 10, kernel = "matern_1_2")
   df <- data.frame(s = dr$grid_coords, y = rep(1L, dr$L),
                    obs_idx = seq_len(dr$L))
-
-  expect_error(
-    deeprv_brm(y ~ deepRV(s, decoder = dr, obs_idx = obs_idx,
-                          ls_prior = prior_uniform(0.05, 0.5),
-                          gr = TRUE),
-               data = df, family = poisson()),
-    "gr"
-  )
   expect_error(
     deeprv_brm(y ~ deepRV(s, decoder = dr, obs_idx = obs_idx,
                           ls_prior = prior_uniform(0.05, 0.5)),
                data = df, family = binomial()),
     "supported families"
+  )
+  expect_error(
+    deeprv_brm(y ~ deepRV(s, decoder = dr, obs_idx = obs_idx,
+                          ls_prior = prior_uniform(0.05, 0.5),
+                          gr = "yes"),
+               data = df, family = poisson()),
+    "TRUE or FALSE"
   )
 })
 

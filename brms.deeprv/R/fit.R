@@ -50,11 +50,21 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
   parsed <- parse_deeprv_formula(formula, data, envir = parent.frame())
   dr_call <- parsed$deepRV[[1L]]
   by_info <- classify_by(dr_call$by)
-  if (!isFALSE(dr_call$gr)) {
-    stop("deepRV(gr = TRUE) is reserved for a follow-up", call. = FALSE)
+  # gr = TRUE is silently accepted: the package's design already computes
+  # decode() once per draw and gathers via obs_idx, which is exactly what
+  # brms::gp(..., gr = TRUE) buys for an exact GP. There's no separate
+  # slower path here. See DESIGN.md section 8 step 8.
+  if (!isFALSE(dr_call$gr) && !isTRUE(dr_call$gr)) {
+    stop("deepRV(gr = ...) must be TRUE or FALSE", call. = FALSE)
   }
-  if (!identical(dr_call$ls_pooling, "complete")) {
-    stop("deepRV(ls_pooling = ...) only supports the default \"complete\"",
+  ls_pooling <- dr_call$ls_pooling
+  if (!(ls_pooling %in% c("complete", "none", "partial"))) {
+    stop("deepRV(ls_pooling = ...) must be one of \"complete\", \"none\", ",
+         "\"partial\"", call. = FALSE)
+  }
+  if (ls_pooling != "complete" && by_info$mode != "factor") {
+    stop("deepRV(ls_pooling = \"", ls_pooling, "\") only makes sense ",
+         "with a factor `by` argument (group-specific length scales).",
          call. = FALSE)
   }
 
@@ -92,7 +102,8 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
   }
 
   stancode <- build_stancode(decoder, dr_call$ls_prior, family = fam$family,
-                             by_mode = by_info$mode)
+                             by_mode = by_info$mode,
+                             ls_pooling = ls_pooling)
   standata <- build_standata(decoder, dr_call, y, X, family = fam$family,
                              by_mode = by_info$mode,
                              by_values = by_info$values,
@@ -112,17 +123,18 @@ deeprv_brm <- function(formula, data, family = stats::poisson(),
   stanfit <- do.call(rstan::stan, sampling_args)
 
   out <- list(
-    stanfit   = stanfit,
-    stancode  = stancode,
-    standata  = standata,
-    decoder   = decoder,
-    deepRV    = dr_call,
-    family    = fam,
-    X         = X,
-    by_mode   = by_info$mode,
-    by_values = by_info$values,
-    by_levels = by_info$levels,
-    n_groups  = by_info$n_groups
+    stanfit    = stanfit,
+    stancode   = stancode,
+    standata   = standata,
+    decoder    = decoder,
+    deepRV     = dr_call,
+    family     = fam,
+    X          = X,
+    by_mode    = by_info$mode,
+    by_values  = by_info$values,
+    by_levels  = by_info$levels,
+    n_groups   = by_info$n_groups,
+    ls_pooling = ls_pooling
   )
   class(out) <- c("deeprv_fit", "list")
   out

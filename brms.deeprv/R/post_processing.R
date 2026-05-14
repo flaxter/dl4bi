@@ -40,16 +40,18 @@ posterior_eta_draws <- function(fit) {
   fixed <- b %*% t(X)       # (S, N)
 
   if (by_mode == "factor") {
-    # z is matrix[G, L] per Stan: extract pulls (S, G, L). For each draw
-    # and group, decode separately, then gather by group_idx + obs_idx.
+    # z is matrix[G, L] per Stan: extract pulls (S, G, L). When
+    # ls_pooling != "complete" ls is vector[G] in Stan so draws$ls is
+    # (S, G); for "complete" it's (S,) and shared across groups.
     z <- draws$z                    # (S, G, L)
     S <- dim(z)[1L]; G <- dim(z)[2L]; L <- dim(z)[3L]
     group_idx <- as.integer(fit$standata$group_idx)
     N <- length(group_idx)
     spatial <- matrix(0, nrow = S, ncol = N)
-    # Per-group batched forward over draws keeps the inner loop in vectorised R.
+    ls_is_per_group <- length(dim(ls)) == 2L
     for (g in seq_len(G)) {
-      mu_g <- forward_decode_batched(fit$decoder, z[, g, ], ls)  # (S, L)
+      ls_g <- if (ls_is_per_group) ls[, g] else ls
+      mu_g <- forward_decode_batched(fit$decoder, z[, g, ], ls_g)
       cols <- which(group_idx == g)
       if (length(cols) > 0L) {
         spatial[, cols] <- mu_g[, obs_idx[cols], drop = FALSE]

@@ -64,8 +64,10 @@ conditional_effects.deeprv_fit <- function(x, probs = c(0.05, 0.95), ...) {
   if (by_mode == "factor") {
     z <- draws$z                                       # (S, G, L)
     G <- dim(z)[2L]
+    ls_is_per_group <- length(dim(ls)) == 2L
     df_list <- lapply(seq_len(G), function(g) {
-      mu_g <- forward_decode_batched(x$decoder, z[, g, ], ls)
+      ls_g <- if (ls_is_per_group) ls[, g] else ls
+      mu_g <- forward_decode_batched(x$decoder, z[, g, ], ls_g)
       data.frame(
         group      = if (is.null(x$by_levels)) as.character(g) else x$by_levels[g],
         grid_index = seq_along(grid),
