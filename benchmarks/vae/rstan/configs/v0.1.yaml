@@ -1,0 +1,28 @@
+# brms.deeprv v0.1 decoder catalog: 8 grid sizes x 4 kernels = 32 decoders.
+#
+# Domain: unit_interval, i.e. grid points on [0, 1].
+# Conditional: ls ~ Uniform(0.01, 1.0) during training.
+#
+# See DESIGN.md §2.1 / §2.8 for the full spec.
+
+arch: MLPDeepRV
+arch_version: "1.0.0"
+domain: unit_interval
+ls_trained_range: [0.01, 1.0]
+
+training:
+  steps: 100000
+  batch: 32
+  lr: 0.001
+  optimizer: adamw
+  weight_decay: 0.01
+  clip_global_norm: 3.0
+  jitter: 5e-4
+  seed: 0
+
+n_match_cases: 4
+
+grids: [5, 10, 20, 50, 100, 200, 500, 1000]
+kernels: [matern_1_2, matern_3_2, matern_5_2, rbf]
+
+output_dir: benchmarks/vae/rstan/artifacts/decoders/v0.1

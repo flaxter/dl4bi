@@ -26,3 +26,4 @@ tmp
 *.txt
 uv.lock
 *.rds
+benchmarks/vae/rstan/artifacts/
