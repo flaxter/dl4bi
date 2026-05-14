@@ -67,3 +67,53 @@ that overhead and the win is real.
   headroom.
 - **GPU via `STAN_OPENCL`** would help the big matmuls in gMLP but not
   the LayerNorm/GELU loops; net 2–4× at this scale.
+
+---
+
+# `deeprv_brm()` vs `brms::gp()` — apples-to-apples Poisson recovery
+
+Both ports fit `y ~ Poisson(exp(eta))` on the same synthetic data
+generated from an exact RBF GP with `ls = 0.2`, `sigma_gp = 1`. The two
+methods see the same `x` grid and the same `y` vector. Iterations:
+1000 (500 warmup), 2 chains, 2 cores, `adapt_delta = 0.95`.
+
+Configuration on the brms side: `gp(s, cov = "exp_quad", scale = FALSE)`
+with brms-default priors on `lscale` and `sdgp` (a global
+`prior(class = "lscale")` silently fails to attach in brms, so I let it
+pick per-coefficient defaults).
+
+Configuration on the deeprv side: `deepRV(s, decoder = load_deeprv(...,
+kernel = "rbf"), ls_prior = prior_uniform(0.05, 0.5))`.
+
+Reproduce: `Rscript benchmarks/vae/rstan/bench_brms_gp_vs_deeprv.R --grids=20,50,100`.
+
+| L | brms wall | deeprv wall | speedup | brms Rhat | drv Rhat | brms divs | drv divs | eta RMSE (drv vs brms) | truth RMSE brms | truth RMSE drv |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 20  | 59.5 s  | 48.5 s | 1.23× | 1.054 | 1.005 | 2 | 0 | 0.120 | 0.437 | 0.348 |
+| 50  | 64.2 s  | 52.8 s | 1.22× | 1.032 | 1.004 | 2 | 0 | 0.152 | 0.283 | 0.183 |
+| 100 | 159.7 s | 54.7 s | **2.92×** | 1.031 | 1.003 | 0 | 0 | 0.056 | 0.258 | 0.258 |
+
+Wall times include Stan compile (~30 s amortised per program; both
+fits hit `auto_write = TRUE` cache after the first L).
+
+## Takeaways
+
+- **At L = 20-50 the comparison is compile-bound** — both fits clock
+  in around a minute and the speedup is modest (~1.2×).
+- **At L = 100 the gap opens up.** brms::gp() jumps to 160 s as the
+  L × L kernel Cholesky becomes expensive; deeprv_brm() stays at 55 s
+  because the decoder forward is O(hidden × L) per leapfrog
+  irrespective of L. **2.9× speedup at L = 100**; the prototype's
+  measured 42 s for MLP at L = 256 suggests the ratio keeps growing
+  superlinearly past L = 200, where brms::gp() turns into a multi-
+  minute fit.
+- **Posterior agreement is solid.** Per-grid `eta` posterior means
+  agree between methods at RMSE 0.06-0.15 across the grids tested,
+  even though the two methods use different priors and different
+  computational paths. Both recover the truth at comparable RMSE
+  (deeprv slightly better at L=20-50; tie at L=100).
+- **Sampler health is slightly cleaner for deeprv.** brms::gp had
+  2 divergences at L=20-50 and Rhat up to 1.054 at L=20 with this
+  iter budget; deeprv had 0 divergences and Rhat below 1.005
+  throughout. Likely the RW(0, I_L) reparameterisation through the
+  decoder mixes more easily than the direct GP for short chains.
