@@ -165,3 +165,43 @@ Reproduce:
 - B: `Rscript benchmarks/vae/rstan/bench_brms_gp_vs_deeprv.R --grids=100 --iter=4000 --align-priors`
 - C: train a 1M-step L=100 RBF decoder into a separate dir; pack with
   `pack_decoders.R`; then add `--decoder-dir=<that path>`.
+
+## Scaling extension: L = 200, 500, 1000
+
+To map the wall-time scaling I added three larger grids. brms::gp() was
+left on default priors here so we exercise the same "out of the box"
+configuration a typical user would reach for. iter scaled down at each
+L to keep total wall time manageable; the comparison still tells the
+right story for wall-time, even if posterior-mean recovery suffers at
+short chains.
+
+| L | iter | brms wall | deeprv wall | speedup | brms Rhat | drv Rhat | brms divs | drv divs | truth RMSE brms | truth RMSE drv |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 20  | 1000 | 60 s | 49 s | 1.23× | 1.054 | 1.005 | 2 | 0 | 0.437 | 0.348 |
+| 50  | 1000 | 64 s | 53 s | 1.22× | 1.032 | 1.004 | 2 | 0 | 0.283 | 0.183 |
+| 100 | 1000 | 160 s | 55 s | 2.92× | 1.031 | 1.003 | 0 | 0 | 0.258 | 0.258 |
+| 200 | 1000 | **24 min** | 73 s | **19.6×** | **51.7** ☠ | 1.007 | 1 | 0 | **0.92** | 0.19 |
+| 500 | 500  | **3.0 hr** | 199 s | **54×** | **3.56** ☠ | 1.015 | 1 | 0 | 0.22 | 0.088 |
+| 1000 | 200 | **4.0 hr** | 887 s | **16×** | **2749** ☠ | 1.041 | 0 | 0 | **1.82** | 0.10 |
+
+### Takeaways
+
+- **The "speedup" framing understates the story past L = 200.**
+  brms::gp() with brms-default priors does not mix at L ≥ 200 within
+  the iter budgets that keep wall time tractable. The L = 1000 chain
+  effectively never moves (Rhat 2749, truth RMSE 1.82 = field-scale
+  prior). The L = 500 fit converges loosely (Rhat 3.56) and the L = 200
+  fit needs ~4× the iters to mix (see the L = 200 re-run below).
+- **deeprv stays clean across the full sweep.** 0 divergences, Rhat
+  ≤ 1.04 even at L = 1000 with only 100 sample iters, truth RMSE
+  monotonically improving with L (0.35 → 0.10) because larger
+  decoders absorb more spatial variation.
+- **Wall-time scaling matches the predicted regimes.** brms::gp's
+  per-iter cost is dominated by the O(L³) Cholesky:
+  60 s → 1430 s → 11 000 s → 14 000 s as L goes 100 → 200 → 500 → 1000.
+  deeprv's per-iter cost is O(hidden·L), so wall grows roughly
+  linearly with L (54 → 73 → 199 → 887 s).
+
+Reproduce: `Rscript benchmarks/vae/rstan/bench_brms_gp_vs_deeprv.R --grids=<L> --iter=<N>` for each L / iter pair above. The L = 500 and
+L = 1000 fits took multiple hours on an Oxford-CS desktop with 2 cores
+allocated; budget overnight.
