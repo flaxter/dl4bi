@@ -272,3 +272,37 @@ when you need operators on the field (v0.3) or care about strict
 reproducibility of the smoothing prior.
 
 Reproduce: `Rscript benchmarks/vae/rstan/bench_brms_gp_vs_deeprv.R --grids=20,50,100,200,500,1000 --include-hsgp --skip-exact --iter=1000`
+
+## L = 200 with iter = 4000: does brms::gp() exact converge with more iter?
+
+The L = 200 line in the scaling table earlier (Rhat = 51.7 at iter = 1000)
+left open the question of whether brms::gp() exact would mix if we
+just ran longer chains. Re-running the same fixture at iter = 4000
+(2000 warmup, 4× the previous iter budget):
+
+| Config | brms wall | brms Rhat | brms divs | treedepth saturation | deeprv wall | deeprv Rhat |
+|---|---|---|---|---|---|---|
+| L = 200, iter = 1000 | 24 min | 51.7 | 1 | not flagged | 73 s | 1.007 |
+| L = 200, **iter = 4000** | **94 min** | **58.7** | 0 | **all 4000 post-warmup transitions saturated treedepth = 10** | **148 s** | **1.002** |
+
+**brms::gp() exact got worse, not better.** Rhat went 51 → 59 and
+*every* post-warmup transition saturated the default `max_treedepth = 10`,
+meaning each leapfrog integration hit the cap of 2¹⁰ = 1024 steps without
+finding a U-turn. HMC literally cannot traverse the GP posterior geometry
+at this L with brms's default settings — more iter doesn't help, and
+the wall-time cost is linear in iter so brms went from 24 min → 94 min.
+
+deeprv at the same fixture: 148 s wall, Rhat = 1.002, zero divergences,
+zero treedepth issues. **38× wall-time speedup and the only one of the
+two methods that actually converges at this L.**
+
+To get brms::gp() exact to mix at L ≥ 200 you'd need to tune
+`max_treedepth`, `adapt_delta`, possibly reparametrise with a
+non-centred GP. That's HMC expert territory. deeprv just works.
+
+This is also one more vote for the HSGP comparison above: HSGP at
+L = 200 fit in 58 s with Rhat = 1.01 and 15 divergences (workable),
+which is ~100× faster than brms::gp() exact and recovers the truth
+at RMSE 0.17 vs brms's 0.88.
+
+Reproduce: `Rscript benchmarks/vae/rstan/bench_brms_gp_vs_deeprv.R --grids=200 --iter=4000`.
