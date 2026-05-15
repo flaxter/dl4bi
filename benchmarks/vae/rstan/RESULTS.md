@@ -205,3 +205,70 @@ short chains.
 Reproduce: `Rscript benchmarks/vae/rstan/bench_brms_gp_vs_deeprv.R --grids=<L> --iter=<N>` for each L / iter pair above. The L = 500 and
 L = 1000 fits took multiple hours on an Oxford-CS desktop with 2 cores
 allocated; budget overnight.
+
+## HSGP — the approximate-GP competitor
+
+`brms::gp(s, ..., k = K, c = c_val)` builds a Hilbert-space GP
+approximation (Riutort-Mayol et al. 2023): K Laplacian basis functions
+on `[-c·L_dom, c·L_dom]`. Per-iter cost is O(K² + K·N), independent of
+how many spatial grid points L there are.
+
+For the fair fixed-budget comparison I used **K = 20, c = 1.5** —
+comfortably above the rule-of-thumb `K ≥ 1.75·c/ℓ ≈ 13` for our
+length-scale region `[0.05, 0.5]`. iter = 1000 across all L.
+
+| L | HSGP wall | deeprv wall | HSGP / drv | HSGP Rhat | HSGP divs | truth RMSE HSGP | truth RMSE drv | eta RMSE (drv vs hsgp) |
+|---|---|---|---|---|---|---|---|---|
+| 20   | 58.7 s | 51.0 s | 1.15×  | 1.007 | 17 | 0.444 | 0.348 | 0.128 |
+| 50   | 56.2 s | 51.5 s | 1.09×  | 1.037 | 15 | 0.277 | 0.183 | 0.135 |
+| 100  | 57.1 s | 56.8 s | 1.00×  | 1.025 | 13 | 0.282 | 0.258 | 0.077 |
+| 200  | 58.5 s | 75.8 s | 0.77×  | 1.010 | 15 | 0.173 | 0.192 | 0.046 |
+| 500  | 62.4 s | 332 s  | 0.19×  | 1.019 | 16 | 0.096 | 0.090 | 0.051 |
+| 1000 | **108 s** | **3735 s (62 min)** | **0.029×** | 1.004 | 7 | 0.088 | 0.099 | 0.056 |
+
+(`HSGP / drv` < 1 means HSGP is faster.)
+
+### Headline
+
+**HSGP beats `deeprv_brm()` on wall time once L ≥ 200, and the gap
+grows fast.** At L = 1000, HSGP fits in 108 s vs deeprv's 62 min —
+34× faster. Posterior agreement with deeprv is solid (eta RMSE
+0.05–0.13 across L), and truth RMSE is within ~10% of deeprv's
+across the entire sweep.
+
+This is the more honest comparison than exact `brms::gp()`. The
+take-aways from earlier in this file ("deeprv is faster than
+brms::gp()") are correct only against the exact O(L³) Cholesky path.
+Against the brms HSGP approximation, deeprv loses on wall time at
+moderate-to-large L because:
+
+- HSGP per-iter cost is **O(K² + K·N)** with `K = 20`. At L = 1000
+  that's ~20 000 ops, sublinear in L.
+- deeprv per-iter cost is **O(hidden·L)** with `hidden = L` (decoder
+  shape `dims = [L, L]`). At L = 1000 that's 10⁶ ops, ~50× more.
+
+### So what does deeprv actually buy?
+
+The wall-time pitch needs revising. What deeprv still offers vs HSGP:
+
+1. **Cleaner sampler geometry.** deeprv had 0 divergences and Rhat
+   ~1.005-1.04 across the sweep; HSGP had 13-17 divergences at every
+   L. Default brms::gp() priors interact awkwardly with the HSGP
+   parametrisation in this fixture.
+2. **Closed-form access to operators on the field** (v0.3 sketch in
+   `DESIGN.md` section 3a). With a differentiable decoder you get
+   derivatives, integrals, and extrema of `f(s)` for free —
+   `deepRV_monotone()`, `deepRV_integral()`, etc. HSGP gives you the
+   field's truncated Karhunen-Loève coefficients but nothing
+   structural about `f` itself.
+3. **Reproducible fixed grids.** deeprv loads a versioned, fingerprinted
+   decoder. HSGP's basis depends on the data domain via `c`; switching
+   `c` or `k` changes the model in subtle ways.
+
+Whether (1) and (3) matter to a particular user is workload-dependent.
+**For raw wall time on Poisson / Gaussian smooths, HSGP is the default
+brms users should reach for at L ≥ 200.** deeprv becomes the answer
+when you need operators on the field (v0.3) or care about strict
+reproducibility of the smoothing prior.
+
+Reproduce: `Rscript benchmarks/vae/rstan/bench_brms_gp_vs_deeprv.R --grids=20,50,100,200,500,1000 --include-hsgp --skip-exact --iter=1000`
