@@ -561,6 +561,36 @@ and accept ~80 min/fit, expose a `arch = "gmlp"` option in `load_deeprv()`.
 Use the external C++ path already prototyped. Document loudly that this
 is "research-grade, not interactive."
 
+### 3.8 Fixed-hidden decoders for sub-quadratic per-iter cost
+
+**Motivation:** the v0.1 catalog uses `MLPDeepRV(dims=[L, L])` so that
+`hidden = L`. Per-leapfrog cost of the Stan model is dominated by the
+two matmuls in `decode()`, both O(hidden · L) = **O(L²)**, plus
+sampling the length-L latent `z`. The bench at L = 1000 shows this is
+where deeprv loses to brms HSGP (which scales as O(K² + K·N) with
+K = 20 basis functions, **independent of grid resolution**) — 62 min
+vs 1.8 min for the same iter budget (see `RESULTS.md`).
+
+**The idea:** train decoders with a fixed `hidden = K` (e.g. K = 64
+or 128) regardless of L. Stan's per-leapfrog work drops to
+**O(K · L)**, same regime as HSGP. Catalog size stays the same; only
+the per-decoder weight count changes (from L² to K · L).
+
+**Open question — would need validation:** does a fixed-K decoder
+still give usable posteriors at L = 1000? The MLP's representational
+power scales with hidden; cutting it to K=64 might lose the ability
+to approximate `chol(K(ℓ)) · z` across the full ℓ range. Need to
+benchmark posterior recovery vs the dims=[L, L] decoder on the same
+fixtures. If MSE creeps above ~0.1, the approximation will visibly
+hurt downstream inferences and the speed advantage is moot.
+
+The fastest experiment: train one L = 1000 RBF decoder at hidden = 64
+(otherwise identical to the v0.1 trainer config), compare training
+MSE to the v0.1 decoder, and run the bench fixture at this hidden
+size. If MSE stays sub-0.1 and HMC stays clean, we have a 10× ish
+deeprv speedup at large L. (Still won't match HSGP for tiny K, but
+brings the wall time competitive again.)
+
 ---
 
 ## 3a · v0.3 — Decoder operators (derivatives, integrals, extremes)
@@ -610,7 +640,46 @@ continuous analogue for `gp()`-style spatial smooths.
   per operator. Up to four decoders per `(grid_size, kernel)`,
   which 4× the catalog size.
 
-### 3a.2 Why this is easier than the gp() equivalent
+### 3a.2 Off-grid prediction via Matheron's update
+
+The v0.1 limitation in §5 — "decoders only support prediction at the
+training grid points" — is currently a hard error in
+`posterior_predict.deeprv_fit`. A v0.3 path to lifting it without
+retraining the decoder is **Matheron's kriging update**: given a
+posterior draw of the field `f_grid = decode(z, ℓ)` at the L training
+grid points, project it to any new location `s*` via
+
+```
+f*(s*) = K_*grid @ K_grid_grid^{-1} @ f_grid
+```
+
+where `K_*grid` is the cross-covariance between `s*` and the L grid
+points, and `K_grid_grid` is the L × L kernel matrix at the grid. (For
+a separable kernel this can be precomputed once per decoder; the
+matrix solve is the only per-prediction cost.)
+
+This gives off-grid predictive draws that are exact under the assumed
+kernel, conditional on the decoded grid values. The decoder still has
+to be accurate at the grid (which the existing forward-parity tests
+verify); the kriging step inherits exactness from the kernel structure.
+
+Two reasons this is appealing for v0.3:
+
+1. **It composes with low-hidden decoders** (§3.8): the decoder gives
+   a cheap fingerprint of the field at L points; Matheron lifts that
+   to a continuous prediction. The user gets HSGP-level speed for
+   inference and exact-kernel projections for prediction.
+2. **It plays well with the operator terms** (§3a.1): derivatives,
+   integrals, and extrema can be computed at off-grid points too,
+   not just at the trained grid.
+
+The catch: Matheron requires the L × L matrix solve, which is O(L³)
+at predict time. For L ≤ 200 this is fast; at L = 1000 it's a one-time
+~30 s cost per posterior draw (or amortise by Cholesky-factoring once
+and re-using). Still much cheaper than fitting an exact GP, since
+it's predict-time only.
+
+### 3a.3 Why this is easier than the gp() equivalent
 
 brms::gp() supports monotone GPs only via projected-process tricks that
 many users find opaque. A `deepRV_monotone()` would replace those with
