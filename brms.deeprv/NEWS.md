@@ -1,4 +1,19 @@
-# brms.deeprv 0.1.0 (in development)
+# brms.deeprv 0.1.0 (beta release)
+
+Beta tag: `v0.1.0-beta`. Install:
+
+```r
+remotes::install_github("flaxter/dl4bi", ref = "v0.1.0-beta",
+                        subdir = "brms.deeprv")
+```
+
+The beta ships only the **L ≤ 200** decoders (24 of the 32 trained for
+v0.1) to keep the installed package under 2 MB. Large-L decoders (500,
+1000) are available on the `claude/deeprv-rstan-integration-VDtiw`
+branch for power users who need them. The HSGP comparison in
+`RESULTS.md` shows that brms's `gp(s, k = 20)` is faster than
+deeprv_brm() at L ≥ 200 anyway, so the trimmed catalog covers the
+regime where deeprv is the right tool.
 
 First release. Implements DESIGN.md sections 2.1-2.9 plus most of 2.10:
 

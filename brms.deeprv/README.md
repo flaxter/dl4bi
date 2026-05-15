@@ -55,15 +55,25 @@ predictor (RMSE ~0.06 at L = 100). Full numbers in
 
 ## Decoder catalog
 
-Shipped under `inst/extdata/decoders/` (~46 MB total):
+Shipped under `inst/extdata/decoders/` (~2 MB total for the v0.1.0-beta):
 
 | Grid size | Kernels |
 |---|---|
-| 5, 10, 20, 50, 100, 200, 500, 1000 | matern_1_2, matern_3_2, matern_5_2, rbf |
+| 5, 10, 20, 50, 100, 200 | matern_1_2, matern_3_2, matern_5_2, rbf |
 
 All trained at 100k steps on a single GPU (~30 min wall). Each .rds
 ships its own `(grid_size, kernel, ls_trained_range, weights)`
 plus a SHA-256 fingerprint validated at load time.
+
+**Note on the L bound.** The full v0.1 training run produced decoders
+for L ∈ {500, 1000} as well; they live on the
+`claude/deeprv-rstan-integration-VDtiw` branch and add ~46 MB to the
+install. The HSGP comparison in
+[`benchmarks/vae/rstan/RESULTS.md`](../benchmarks/vae/rstan/RESULTS.md)
+shows that brms's `gp(s, k = 20, c = 1.5)` is **faster than
+deeprv_brm() at L ≥ 200** anyway — so the trimmed catalog covers the
+regime where deeprv is the right tool, and large-L users should
+reach for HSGP.
 
 ## Limitations
 
@@ -78,9 +88,14 @@ plus a SHA-256 fingerprint validated at load time.
 ## Install
 
 ```r
-# From source (not yet on CRAN; the 46 MB catalog exceeds the 5 MB
-# tarball limit, so distribution is via GitHub for v0.1):
-remotes::install_github("flaxter/dl4bi", subdir = "brms.deeprv")
+# Beta release: L <= 200 decoders, ~2 MB total. Fast install.
+remotes::install_github("flaxter/dl4bi", ref = "v0.1.0-beta",
+                        subdir = "brms.deeprv")
+
+# Power-user variant: full catalog including L = 500 / 1000 (~46 MB).
+remotes::install_github("flaxter/dl4bi",
+                        ref = "claude/deeprv-rstan-integration-VDtiw",
+                        subdir = "brms.deeprv")
 ```
 
 `rstan` is a hard runtime dependency for any fitting; `brms` is

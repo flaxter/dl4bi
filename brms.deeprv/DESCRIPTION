@@ -1,6 +1,6 @@
 Package: brms.deeprv
 Title: Pre-Trained Deep Random-Variate Decoders for 'brms'
-Version: 0.1.0.9000
+Version: 0.1.0
 Authors@R:
     person("Seth", "Flaxman", , "flaxter@gmail.com", role = c("aut", "cre"))
 Description: Companion to 'brms' that injects pre-trained MLPDeepRV

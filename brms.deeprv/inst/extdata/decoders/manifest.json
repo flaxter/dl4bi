@@ -31,14 +31,6 @@
     "471d58edf427d8f3239d29b8fbb48cd5d53d17488ecd76bf9022e5dd6a927de6": "unit_interval_200_matern_1_2.rds",
     "9dbd8886cda78a274ad9a55d7217e53084c95bf47ea768348f29453ed9123970": "unit_interval_200_matern_3_2.rds",
     "0ee6793129f80038c758058fc765ca01dd5ef3ad6d1ea16cfa5034e27bc51d64": "unit_interval_200_matern_5_2.rds",
-    "5c45ca4d749fddf81a9fd3d2f94ec1df69256eb719f63e63ce694d4543db79df": "unit_interval_200_rbf.rds",
-    "58a1aefb18b4f9986ca9816ae88225b84120f77247ac64b4ca0b48db10d1fd0b": "unit_interval_500_matern_1_2.rds",
-    "e0d2d458bb3c15907434301be17c7b337cec6841c674966432028db201ae0292": "unit_interval_500_matern_3_2.rds",
-    "cf6d769875e6d436332aff4fb52e163c7fd885ffb24ff14cd931b69e772582ef": "unit_interval_500_matern_5_2.rds",
-    "715b73613273f5d08f956bfbf5d854ba208912a2fba1b2498a4b99d1eb196a62": "unit_interval_500_rbf.rds",
-    "ac572b0474c513c78d7ce80884e783ce341c36bd44f360d04415136cd51c547e": "unit_interval_1000_matern_1_2.rds",
-    "b4ba32d68f48eeb0943cfafbab56c7a75da1b899e1f8f9756d4ab8e01b7f1ab0": "unit_interval_1000_matern_3_2.rds",
-    "28f3d4db6a8610c2d23dad1760cfbca7ffc5843a3e851ca366656702016f96a4": "unit_interval_1000_matern_5_2.rds",
-    "67d7d48229b950c752c6de3759829634924e231efc0a6f9652744a4c87cf9b96": "unit_interval_1000_rbf.rds"
+    "5c45ca4d749fddf81a9fd3d2f94ec1df69256eb719f63e63ce694d4543db79df": "unit_interval_200_rbf.rds"
   }
 }
