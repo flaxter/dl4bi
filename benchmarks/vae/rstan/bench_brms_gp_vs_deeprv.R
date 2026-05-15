@@ -122,15 +122,23 @@ fit_brms_gp <- function(df, iter, warmup, seed, align_priors = FALSE) {
 # Hilbert-space GP approximation. K basis functions over the extended
 # domain [-c*L_dom, c*L_dom]. Per-iter cost is O(K^2 + K*N), much faster
 # than the O(L^3) Cholesky of the exact GP at large L.
+#
+# Note: brms parses gp(..., k = k, c = c_val) at formula-evaluation time,
+# where the function's local k / c_val aren't in scope. Bake the
+# numeric values directly into the formula string instead.
 fit_brms_hsgp <- function(df, k, c_val, iter, warmup, seed, align_priors) {
   brms_prior <- NULL
   if (align_priors) {
     brms_prior <- brms::prior_string(sprintf("uniform(%g, %g)", ls_lo, ls_hi),
                                      class = "lscale", coef = "gps")
   }
+  formula_str <- sprintf(
+    "y ~ gp(s, cov = 'exp_quad', scale = FALSE, k = %d, c = %g)",
+    as.integer(k), c_val
+  )
   t0 <- Sys.time()
   fit <- brms::brm(
-    bf(y ~ gp(s, cov = "exp_quad", scale = FALSE, k = k, c = c_val)),
+    formula = stats::as.formula(formula_str),
     data    = df,
     family  = poisson(),
     prior   = brms_prior,
