@@ -436,3 +436,73 @@ user wants a fixed-grid, fingerprinted prior they can re-load
 deterministically.
 
 Reproduce: `Rscript benchmarks/vae/rstan/bench_2d_compare.R`.
+
+## Where HSGP breaks: short length-scales relative to K
+
+Earlier sections used HSGP with `k = 20, c = 1.5`, which by the
+Riutort-Mayol et al. 2023 rule of thumb (`K >= 1.75 * c * L_dom / ls`)
+suffices for `ls >= 0.13`. What happens at `ls = 0.05` (K_required ≥ 52.5,
+so K = 20 is well under)?
+
+Same L = 250 / iter = 4000 / default-priors / Matérn-3/2 setup as the
+disentanglement comparison, with `ls_true = 0.05` and `beta0 = 0`
+(mean rate ~1, decent signal-to-noise).
+
+| Method | wall | Rhat | divs | per-draw RMSE 90% CI | posterior-mean RMSE |
+|---|---|---|---|---|---|
+| brms exact                           | 60 min | 1.003 | 6 | [0.33, 0.53] (mean 0.42) | **0.285** |
+| brms HSGP k=20 (the headline default)| 149 s  | 1.002 | 3 | [0.61, 0.72] (mean 0.66) | **0.642** ← broken |
+| brms HSGP k=60 (sufficient K)        | 91 s   | 1.001 | 9 | [0.33, 0.52] (mean 0.41) | 0.308 |
+| deeprv_brm                           | 277 s  | 1.001 | **0** | [0.35, 0.52] (mean 0.43) | 0.325 |
+
+### What this means
+
+1. **HSGP k=20 fails silently and confidently.** Posterior-mean RMSE
+   0.642 is **2.25× worse than exact** and its per-draw 90% CI
+   [0.61, 0.72] doesn't even overlap the other methods' CIs. The
+   truncated basis can't represent the short-scale field, so HSGP
+   returns an oversmoothed posterior that's confidently wrong. Rhat,
+   divergences, and treedepth all look fine — there's no
+   sampler-side red flag to tell the user "K is too small."
+
+2. **The fix is to bump K.** HSGP k=60 (above the K_required ≥ 52.5
+   threshold) recovers to RMSE 0.308, close to exact's 0.285. So this
+   isn't a fundamental limit of HSGP, just a K-budget issue.
+
+3. **The user has to know to do that.** K depends on the unknown
+   length-scale of the data-generating process. In practice users
+   pick a default and run; if `ls` happens to be small enough that
+   K_required exceeds K_chosen, the fit looks healthy but is
+   substantially biased.
+
+4. **deeprv has no such failure mode here.** The L=250 catalog
+   decoder was trained for `ls ∈ [0.01, 1.0]`; `prior_uniform(0.02,
+   0.5)` covers the truth at `ls = 0.05` and the fit just works
+   (RMSE 0.325, comparable to k=60 HSGP and exact). No tuning knob
+   to misset. Sampler-cleanest of the four (0 divergences).
+
+### Implications for the earlier "HSGP wins" framing
+
+The earlier sections in this file said HSGP beats deeprv on wall time
+and matches it on accuracy across L = 20-1000 (1D) and L = 400 (2D).
+That comparison was at `ls = 0.15-0.2`, which is comfortably above
+K = 20's resolution. **The HSGP-best ranking is conditional on the
+user picking a K that matches the truth's length-scale**, which they
+won't always know how to do.
+
+The honest claim is now:
+
+- **For users who know their data's length-scale regime well**: tune K
+  per the rule-of-thumb and HSGP wins on wall time and matches deeprv
+  on accuracy.
+- **For users who don't (or whose data may have heterogeneous scales)**:
+  deeprv's catalog covers the full ls range without per-fit tuning. K
+  mis-specification fails silently; deeprv's prior-range
+  mis-specification fails loudly (an explicit error at fit time, see
+  `validate_prior_in_range`).
+
+This is the first robustness-axis on which deeprv clearly beats HSGP
+for "vanilla GP smoothing", not just on the operator-terms-and-friends
+axes from earlier.
+
+Reproduce: `Rscript benchmarks/vae/rstan/bench_short_ls.R`.
