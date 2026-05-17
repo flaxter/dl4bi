@@ -591,6 +591,116 @@ size. If MSE stays sub-0.1 and HMC stays clean, we have a 10× ish
 deeprv speedup at large L. (Still won't match HSGP for tiny K, but
 brings the wall time competitive again.)
 
+### 3.9 Catalog retrain at 10x more steps (accuracy, zero risk)
+
+**Empirical anchor:** the disentanglement experiment trained one L=100
+RBF decoder at 1M steps (10x the v0.1 catalog's 100k) and measured:
+
+| | Training MSE | eta RMSE vs brms exact |
+|---|---|---|
+| v0.1 catalog L=100 RBF (100k steps) | 0.030  | 0.048 |
+| 1M-step rerun, same arch            | **0.0028** (10x) | **0.027** (44% lower) |
+
+Retraining the **full 32-decoder catalog at 1M steps** is the most
+predictable accuracy improvement available. Cost: ~5 hours on the GPU
+(v0.1 training was 30 min total for the same catalog at 100k steps;
+scales linearly). Zero risk: pure improvement in the forward-parity
+metric, no inference-time changes.
+
+Ship as `arch_version = "1.0.0-1M"` (or bump to 1.1.0). The
+fingerprint changes, so v0.1 fits don't silently switch decoders.
+
+### 3.10 Low-dimensional latent decoder (the big speed+accuracy lever)
+
+The single biggest reason HSGP beats deeprv at L >= 200 is parameter
+count: HSGP samples K = 20 basis weights, deeprv samples L = 1000
+latent z's. Even if we lift §3.8's per-iter cost from O(L²) to O(K·L),
+HMC still has to mix over L parameters.
+
+**Idea:** train a VAE-style encoder/decoder pair where the latent is
+**K-dimensional** (e.g. K = 32 or 64) regardless of L:
+
+    z_compact ~ N(0, I_K)          // sampled by HMC (low-dim!)
+    f = decode(z_compact, ls)      // expands to length L
+
+Encoder used at training time only:
+
+    z_compact = encode(f_target, ls)  // f_target = chol(K(ls)) @ z_full
+
+Trained with reconstruction loss `||decode(encode(f_target)) - f_target||^2`
+plus a KL term so `encode(f)` stays close to standard normal at inference.
+
+**Expected impact:** at L=1000 the Stan model has 32 latent params
+instead of 1000. HMC complexity drops dramatically. Could match HSGP
+wall time AND keep the catalog approach (decoder weights are still
+shipped per (grid, kernel)).
+
+**Risk:** the K-dim bottleneck might oversmooth like HSGP at small K
+(already documented as failing at ls=0.05 with K=20). Mitigation:
+
+- K large enough to cover the spectrum at the **shortest** ls in the
+  training range. For ls in [0.01, 1.0] this argues K >= 100 or so;
+  may still be a win over L=1000 latents.
+- Or: train **separate decoders** at different K's, picked at load
+  time by the user's expected ls range.
+- Validation: rerun the §RESULTS.md short-ls bench (ls=0.05) with the
+  K-dim decoder; require post-mean RMSE within ~10% of the exact GP.
+
+**Implementation cost:** ~1-2 weeks. New training script (encoder is
+trained alongside the decoder, but only the decoder is shipped). .rds
+schema gets new `latent_dim` field. Stan-side latent declaration
+changes from `vector[L] z` to `vector[latent_dim] z`. `posterior_eta_draws`
+needs the new forward path.
+
+This is v0.2-or-v0.3-grade; bigger than §3.8 + §3.9 combined.
+
+### 3.11 The robustness story is real (positioning, not work)
+
+The short-ls bench (`RESULTS.md`) showed HSGP k=20 fails silently at
+ls=0.05 (post-mean RMSE 0.64 vs exact's 0.29) while deeprv handles
+the same fixture cleanly (RMSE 0.32). This is the first robustness
+axis on which deeprv clearly beats HSGP for vanilla GP smoothing —
+not just on the operator-terms axes from §3a.
+
+**Implication for the v0.2 catalog:** retraining at 1M steps (§3.9)
+should *preserve* this property since the trained ls range covers
+the full [0.01, 1.0]. Fixed-hidden decoders (§3.8) should also
+preserve it if hidden is large enough. The §3.10 VAE-style decoder
+might compromise it depending on the latent-dim choice — explicit
+test required.
+
+**User-facing copy for v0.2 release notes:**
+
+> deeprv covers the full ls in [0.01, 1.0] range via the shipped
+> catalog; you don't need to pick a K-budget that matches your data's
+> length-scale. HSGP at brms-default K=20 fails silently when ls is
+> below ~0.13.
+
+### 3.12 Mixed-precision / sparse / structured weights (minor)
+
+- **FP32 weights**: shipped .rds files store FP64; Stan promotes to
+  type T anyway. Halving the stored precision saves disk and load
+  time; per-iter cost unchanged. Maybe 10-30 % faster install for
+  the L=1000 decoders.
+- **Block-sparse weights for short-correlation kernels.** Matern-1/2
+  has local kernel support; the optimal `chol(K)` is sparse. The
+  decoder may learn approximately sparse W1/W2 already; explicit
+  pruning could reduce the per-iter matmul cost at large L.
+  Implementation moderate (need Stan-side sparse-matmul support, or
+  in-loop sparse construction).
+- **External templated C++ via rstan --allow-undefined**: tried in the
+  prototype, was SLOWER for MLP at L=256 due to Eigen::Map
+  materialization tax (DESIGN §4.4). Not promising.
+
+### 3.13 What NOT to do for v0.2
+
+- **gMLP variant for the default catalog.** More accurate per iter
+  (matches exact closely) but ~100× slower wall (RESULTS.md MLP vs
+  gMLP at L=256: 42 s vs 138 min). Stays in the "research-grade"
+  bucket per §3.7.
+- **Train custom decoders on user data.** §3.5 sketches it; out of
+  scope for v0.2 if §3.10 is also being attempted.
+
 ---
 
 ## 3a · v0.3 — Decoder operators (derivatives, integrals, extremes)
