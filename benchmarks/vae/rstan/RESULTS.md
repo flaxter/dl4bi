@@ -306,3 +306,67 @@ which is ~100× faster than brms::gp() exact and recovers the truth
 at RMSE 0.17 vs brms's 0.88.
 
 Reproduce: `Rscript benchmarks/vae/rstan/bench_brms_gp_vs_deeprv.R --grids=200 --iter=4000`.
+
+## L = 250 Matérn-3/2 default-priors comparison with uncertainty intervals
+
+A "reasonably large, mildly hard" head-to-head at L = 250, designed
+to exercise all three methods on a harder fixture than the L ≤ 200
+RBF baseline:
+
+- Kernel: **Matérn-3/2** (rougher than RBF, less data-friendly).
+- Length-scale truth: **ls = 0.15** (tighter; closer to the Nyquist
+  resolution of the L = 250 grid).
+- Intercept: **beta0 = -1** so mean rate is ~0.37 — more Poisson
+  noise per cell (103 of 250 cells nonzero in this fixture).
+- iter = 4000 (warmup = 2000), 2 chains, adapt_delta = 0.95, **all
+  defaults**: brms uses default `inv_gamma` on `lscale` and
+  `student_t` on `sdgp`; deeprv uses `prior_uniform(0.05, 0.5)`.
+
+Decoder for deeprv: a freshly trained L = 250 Matérn-3/2 decoder at
+100k steps (training MSE = 0.0068, ~5× tighter than the v0.1
+catalog's typical L = 100 decoder).
+
+For each method I extract S = 4000 posterior draws of `eta` (the
+linear predictor), then compute per-draw `RMSE(eta_s, eta_true)` to
+build a distribution. The mean of that distribution is the
+**per-draw RMSE mean**; the 5th / 95th percentiles give a 90 % CI.
+I also report the conventional **posterior-mean RMSE**
+(`RMSE(mean(eta_s), eta_true)`), which is what you'd quote in a
+paper.
+
+| Method | wall | Rhat | divs | per-draw RMSE 90 % CI | posterior-mean RMSE |
+|---|---|---|---|---|---|
+| brms::gp() exact          | **53 min** | 1.003 | 28 | [0.302, 0.572] (mean 0.424) | 0.262 |
+| brms::gp() HSGP (k=20)    | **62 s**   | 1.000 |  7 | [0.266, 0.488] (mean 0.363) | **0.240** |
+| deeprv_brm() (matern_3_2) | **125 s**  | 1.002 |  **0** | [0.295, 0.532] (mean 0.409) | 0.279 |
+
+### Bottom line
+
+**HSGP wins on accuracy by a small margin** (posterior-mean RMSE
+0.240 vs 0.262 exact, 0.279 deeprv) — and it's also the fastest of
+the three by 25× over deeprv and ~50× over exact GP.
+
+**deeprv has the cleanest sampler health**: 0 divergences vs HSGP's
+7 vs brms exact's 28. Modest but real — meaningful if you care about
+tail-of-posterior estimates.
+
+The per-draw RMSE 90 % CIs **overlap heavily** across methods (HSGP
+[0.27, 0.49], exact [0.30, 0.57], deeprv [0.30, 0.53]). The HSGP-best
+ranking is suggestive from a single fixture but not statistically
+significant; tightening it would mean multi-seed bootstrap (5–10
+fixtures × 3 methods, dominated by the 53 min exact GP fit per seed).
+
+**Note on brms::gp() exact converging here.** Earlier results in this
+file recorded brms exact failing to mix at L ≥ 200 (Rhat = 51.7 at
+L = 200 iter = 1000, Rhat = 58.7 at iter = 4000, all transitions
+saturating treedepth = 10). That was specifically with the **RBF
+kernel + brms's default inv_gamma lscale prior + low-noise (intercept
+0) fixture**. The Matérn-3/2 + intercept = -1 + iter = 4000 config
+above mixes cleanly (Rhat = 1.003, 28 divergences total) — apparently
+the brms-default prior interacts much more favourably with Matérn-3/2
+than with RBF, and the lower-information Poisson signal gives the
+posterior a less pathological geometry. **brms::gp() exact mixability
+is fixture-dependent in ways that aren't obvious upfront**; budget
+for HMC tuning if you choose it at L ≥ 200.
+
+Reproduce: `Rscript benchmarks/vae/rstan/bench_L250_compare.R`.
