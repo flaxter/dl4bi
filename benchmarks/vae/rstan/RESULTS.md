@@ -370,3 +370,69 @@ is fixture-dependent in ways that aren't obvious upfront**; budget
 for HMC tuning if you choose it at L ≥ 200.
 
 Reproduce: `Rscript benchmarks/vae/rstan/bench_L250_compare.R`.
+
+## 2D head-to-head: brms exact vs HSGP vs deeprv Kron (N_side = 20, L = 400)
+
+The 1D comparisons above leave open whether HSGP still wins in 2D —
+where deeprv has a natural advantage through `load_deeprv_kron()`'s
+explicit separable-kernel construction. To test: a unit_square
+Poisson fixture drawn from a separable Matérn-3/2 GP, fit by all
+three methods with default priors and iter = 4000.
+
+Fixture:
+- N_side = 20 grid points per axis -> L = 400 spatial cells.
+- Separable Matérn-3/2 with ls_x = ls_y = 0.2, sigma_gp = 1,
+  generated via the Kronecker Cholesky `F = L_x %*% Z %*% L_y^T`.
+- Intercept = -1 (mean rate ~0.37; 163 of 400 cells nonzero).
+
+Methods (all default priors):
+- `brms::gp(x1, x2, cov = "matern32", scale = FALSE, iso = FALSE)` —
+  exact separable 2D GP.
+- `brms::gp(x1, x2, cov = "matern32", scale = FALSE, iso = FALSE,
+  k = 20, c = 1.5)` — HSGP with K² = 400 tensor-product basis
+  functions.
+- `deeprv_brm()` with `load_deeprv_kron("unit_square", grid_side = 20,
+  kernel = "matern_3_2")` and `prior_uniform(0.05, 0.5)` on each
+  axis's length-scale.
+
+| Method | wall | Rhat | divs | per-draw RMSE 90 % CI | posterior-mean RMSE |
+|---|---|---|---|---|---|
+| brms exact 2D (iso = FALSE)         | **2 h 11 m** | 1.003 | 0 | [0.52, 0.74] (mean 0.62) | **0.397** |
+| brms HSGP 2D (k=20/dim, c=1.5)      | **84 s**     | 1.002 | 0 | [0.49, 0.65] (mean 0.56) | **0.397** |
+| deeprv_brm Kron (grid_side=20)      | **138 s**    | 1.003 | 0 | [0.52, 0.67] (mean 0.59) | 0.413 |
+
+### Bottom line
+
+**HSGP and exact 2D tie on posterior-mean RMSE** (0.397) while HSGP
+is **93× faster** (84 s vs 2 h 11 m). deeprv Kron is 4 % less
+accurate (0.413), ~57× faster than exact GP, and ~1.6× slower than
+HSGP. All three have zero divergences and clean Rhat — 2D sampling
+geometry is friendlier here than the 1D Matérn-3/2 case at L=250.
+
+The per-draw RMSE 90 % CIs overlap pairwise — the HSGP-vs-deeprv
+gap (0.413 - 0.397 = 0.016 on posterior-mean RMSE; ~0.04 on per-draw
+mean) is not individually statistically significant from one
+fixture. The qualitative ranking matches the 1D L = 250 result
+though: HSGP ≥ exact ≥ deeprv on accuracy, HSGP > deeprv > exact
+on speed.
+
+### Why HSGP wins in 2D too
+
+- HSGP per-iter cost: O(K^d × N) = 20² × 400 ≈ 1.6e5 ops; *flat*
+  in L (= N here) since the basis count is fixed.
+- deeprv Kron per-iter cost: 2 × N_side² × hidden = 2 × 400 × 20
+  = 1.6e4 ops for the decode itself, but the latent matrix
+  `matrix[T, L]` z has N_side² = 400 parameters that HMC has to
+  sample. That latent-dimensionality cost dominates and grows
+  linearly with L.
+- brms exact 2D: O(L³) Cholesky = 6.4e7 ops per iter.
+
+The takeaway is the same as in 1D: **HSGP's compact basis
+representation beats deeprv's grid-resolution-sized latent for
+straight GP smoothing**. deeprv's edge sits in regimes the bench
+hasn't touched yet — operator terms (∂f, ∫f, etc., DESIGN §3a),
+unusual kernels not natively in brms's `cov` menu, or any place a
+user wants a fixed-grid, fingerprinted prior they can re-load
+deterministically.
+
+Reproduce: `Rscript benchmarks/vae/rstan/bench_2d_compare.R`.
