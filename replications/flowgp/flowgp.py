@@ -88,6 +88,8 @@ def flowgp_sample(
     beta0: float = 1e-5,
     beta1: float = 10.0,
     t_min: float = 1e-3,
+    f_hat_init: jnp.ndarray | None = None,
+    eps: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Draw samples from p(f0 | D, C) via the whitened probability-flow ODE.
 
@@ -104,6 +106,13 @@ def flowgp_sample(
         jitter: diagonal jitter added to K_pred before the Cholesky factorisation.
         beta0, beta1: VP schedule endpoints.
         t_min: truncation tau, avoiding the singular bridge factor as t -> 0.
+        f_hat_init: optional (n_samples, m) initial whitened state. When supplied
+            (together with a fixed ``eps``) the sampler becomes a deterministic
+            flow map z -> f0, which is what makes it distillable into a fast
+            emulator. Defaults to fresh white noise.
+        eps: optional MC guidance noise, broadcastable to (n_samples, S, m).
+            Sharing a single draw across trajectories makes the map deterministic
+            in ``f_hat_init``.
 
     Returns:
         (n_samples, m) array of samples from the conditioned predictive.
@@ -121,10 +130,15 @@ def flowgp_sample(
 
     key_init, key_eps = jax.random.split(key)
     # Initial whitened state: pure white noise (Algorithm 1, line 3).
-    f_hat = jax.random.normal(key_init, (n_samples, m))
+    if f_hat_init is None:
+        f_hat = jax.random.normal(key_init, (n_samples, m))
+    else:
+        f_hat = f_hat_init
+        n_samples = f_hat.shape[0]
     # Reparameterisation trick: fix the MC noise across steps to reduce
     # step-to-step variance (Appendix F.3).
-    eps = jax.random.normal(key_eps, (n_samples, S, m))
+    if eps is None:
+        eps = jax.random.normal(key_eps, (n_samples, S, m))
 
     def whitened_loglik(fh):  # fh: (m,) whitened sample of f0
         return loglik_fn(L @ fh + m_pred)
