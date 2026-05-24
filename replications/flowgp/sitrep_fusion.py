@@ -57,12 +57,17 @@ M = 80
 X = jnp.linspace(0.0, 1.0, M)
 KAPPA, TAU2, OBS_STD = 0.07, 2.0, 0.4
 
-# Natural-language sitrep version of `sitrep_score`.
+# Natural-language sitrep version of `sitrep_score`. NOTE: deliberately
+# describes ONLY the late-window resurgence -- the incremental qualitative
+# content beyond what the case data D already supports. Mentioning the early
+# peak too would double-count (the LLM would reward candidates for a feature
+# the data already enforces), per the circularity caveat in HANDOFF.md.
 SITREP = (
-    "After an initial peak around week 3, cases declined, but surveillance "
-    "from the field reports a renewed and sustained increase in incidence "
-    "during the final weeks of the observation window. Daily case counts in "
-    "those final weeks are clearly elevated above baseline (well above 1.0)."
+    "Field surveillance report: in the FINAL portion of the observation window "
+    "(roughly the last 25% of the time axis, x near 0.8 to 1.0), incidence has "
+    "RISEN AGAIN and is clearly elevated above baseline -- daily case counts in "
+    "that late window are well above 1.0. The earlier shape of the outbreak is "
+    "not the subject of this report; only the renewed late-period increase."
 )
 
 
