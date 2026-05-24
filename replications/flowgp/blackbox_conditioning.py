@@ -25,12 +25,23 @@ ends, peaking near x=0.7 at height ~2. It uses argmax / mode-counting / threshol
 truncated Gaussians, direct generators, and gradient guidance, but that FlowGP's
 evaluate-only guidance handles.
 
+With ``--llm`` the programmatic verifier is replaced by a real open-weights
+instruction-tuned LM (Qwen/Llama via ``llm_score.LLMVerifier``) that scores
+each candidate trajectory by ``log P(Yes) - log P(No)`` to the prompt
+"Is this function consistent with: <DESCRIPTION>? Yes/No". The guidance loop
+is unchanged -- only the score function is swapped (paper Sec 6.3, Eq. 35).
+Use ``--mock-llm`` to route the programmatic verifier through the same callback
+path for smoke-testing without torch/GPU.
+
 Run:
-    uv run python replications/flowgp/blackbox_conditioning.py
+    uv run python replications/flowgp/blackbox_conditioning.py            # programmatic
+    uv run python replications/flowgp/blackbox_conditioning.py --mock-llm # mock callback
+    uv run python replications/flowgp/blackbox_conditioning.py --llm      # real LLM (GPU)
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 
 import jax
@@ -38,7 +49,11 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
+import matplotlib  # noqa: E402
+
+matplotlib.use("Agg")  # headless-friendly
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 from flowgp import make_schedule, snr_uniform_grid  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +63,13 @@ LENGTHSCALE = 0.25  # smooth enough that a single bump is prior-plausible
 
 # "Description" targets (what an LLM prompt would convey).
 PEAK_LOC, PEAK_VAL = 0.7, 2.0
+
+# Natural-language version of the same description, for the LLM verifier.
+DESCRIPTION = (
+    "a single smooth bump on the interval [0, 1], starting and ending near "
+    "zero at the endpoints, rising to a peak near x=0.7 with maximum value "
+    "close to +2.0, and otherwise monotone on either side of the peak."
+)
 
 
 def se_kernel(xa, xb):
@@ -118,7 +140,78 @@ def blackbox_guided_sample(
     return f_hat @ L.T + m_pred
 
 
+def _report(name, s):
+    pk = X_GRID[jnp.argmax(s, axis=1)]
+    pv = jnp.max(s, axis=1)
+    sign = jnp.sign(jnp.diff(s, axis=1))
+    nmax = jnp.sum((sign[:, :-1] > 0) & (sign[:, 1:] < 0), axis=1)
+    print(
+        f"  {name:14s}: peak loc {float(pk.mean()):.2f}+-{float(pk.std()):.2f} "
+        f"(target {PEAK_LOC}) | peak val {float(pv.mean()):.2f}+-{float(pv.std()):.2f} "
+        f"(target {PEAK_VAL}) | unimodal frac {float(jnp.mean(nmax == 1)):.2f} | "
+        f"|f(0)|+|f(1)| {float((jnp.abs(s[:, 0]) + jnp.abs(s[:, -1])).mean()):.2f}"
+    )
+
+
+def _run_llm(key, m_pred, K_pred, args):
+    """Drive FlowGP with a real LLM (or mock) as the verifier."""
+    from llm_score import LLMVerifier, MockVerifier, flowgp_pyloop, make_score_fn
+
+    if args.mock_llm:
+        backend = MockVerifier(describe_logscore)
+        backend.x_grid = np.asarray(X_GRID)  # for debug_show_prompt
+    else:
+        backend = LLMVerifier(
+            model_name=args.model,
+            mode=args.mode,
+            x_grid=np.asarray(X_GRID),
+            n_show=args.n_show,
+            max_batch=args.batch,
+            device=args.device,
+        )
+    score_fn = make_score_fn(backend, DESCRIPTION, temperature=args.temperature)
+    cond = flowgp_pyloop(
+        key,
+        m_pred,
+        K_pred,
+        score_fn,
+        n_samples=args.n_samples,
+        T=args.T,
+        S=args.S,
+        progress=True,
+    )
+    print(
+        f"  [LLM calls: {backend.calls} (~{backend.total_prompts} prompts total)]"
+    )
+    backend.close()
+    return cond
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--llm", action="store_true", help="use a real LLM verifier")
+    parser.add_argument(
+        "--mock-llm",
+        action="store_true",
+        help="route the JAX programmatic verifier through the LLM-callback path",
+    )
+    parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--mode", choices=("yesno", "seqlp"), default="yesno")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--n-show", type=int, default=12)
+    parser.add_argument("--batch", type=int, default=64)
+    parser.add_argument("--n-samples", type=int, default=32)
+    parser.add_argument("--T", type=int, default=200)
+    parser.add_argument("--S", type=int, default=64)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="divides the LLM log-score before the softmax; raise to avoid weight collapse",
+    )
+    parser.add_argument("--tag", default="", help="suffix on the output figure filename")
+    args = parser.parse_args()
+
     key = jax.random.PRNGKey(0)
     K = se_kernel(X_GRID, X_GRID) + 1e-6 * jnp.eye(M)
 
@@ -127,43 +220,39 @@ def main():
     L = jnp.linalg.cholesky(K)
     prior = jax.random.normal(k_p, (200, M)) @ L.T
 
-    print(
-        "[FlowGP] conditioning on the black-box description via evaluate-only guidance"
-    )
-    key, k_f = jax.random.split(key)
-    cond = blackbox_guided_sample(k_f, jnp.zeros(M), K, describe_logscore, 200)
-
-    def report(name, s):
-        pk = X_GRID[jnp.argmax(s, axis=1)]
-        pv = jnp.max(s, axis=1)
-        sign = jnp.sign(jnp.diff(s, axis=1))
-        nmax = jnp.sum((sign[:, :-1] > 0) & (sign[:, 1:] < 0), axis=1)
+    if args.llm or args.mock_llm:
+        kind = "LLM" if args.llm else "mock-LLM"
+        print(f"\n[FlowGP+{kind}] conditioning via gradient-free guidance through llm_score")
+        key, k_f = jax.random.split(key)
+        cond = _run_llm(k_f, jnp.zeros(M), K, args)
+        label = f"FlowGP+{kind}"
+    else:
         print(
-            f"  {name:10s}: peak loc {float(pk.mean()):.2f}+-{float(pk.std()):.2f} "
-            f"(target {PEAK_LOC}) | peak val {float(pv.mean()):.2f}+-{float(pv.std()):.2f} "
-            f"(target {PEAK_VAL}) | unimodal frac {float(jnp.mean(nmax == 1)):.2f} | "
-            f"|f(0)|+|f(1)| {float((jnp.abs(s[:, 0]) + jnp.abs(s[:, -1])).mean()):.2f}"
+            "\n[FlowGP] conditioning on the programmatic verifier via evaluate-only guidance"
         )
+        key, k_f = jax.random.split(key)
+        cond = blackbox_guided_sample(k_f, jnp.zeros(M), K, describe_logscore, 200)
+        label = "FlowGP"
 
-    report("prior", prior)
-    report("FlowGP", cond)
+    _report("prior", prior)
+    _report(label, cond)
     print(
         "\n  The GP is steered to match a description it can only be *scored* "
         "against --\n  no gradient, no generator. That is FlowGP's irreducible niche; "
-        "swap the\n  verifier for an LLM log-likelihood and this is the text-conditioning "
-        "of Sec 6.3."
+        "with --llm\n  the verifier is an open-weights instruct LM (Section 6.3)."
     )
 
-    _plot(prior, cond)
+    _plot(prior, cond, label=label, tag=args.tag)
 
 
-def _plot(prior, cond):
+def _plot(prior, cond, label="FlowGP", tag=""):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), sharey=True)
     axes[0].set_title("Unconditional GP prior")
     for tr in prior[:25]:
         axes[0].plot(X_GRID, tr, color="tab:gray", lw=0.5, alpha=0.5)
-    axes[1].set_title("Conditioned on black-box description (evaluate-only)")
-    for tr in cond[:25]:
+    axes[1].set_title(f"Conditioned via {label} (evaluate-only)")
+    n_draw = min(25, cond.shape[0])
+    for tr in cond[:n_draw]:
         axes[1].plot(X_GRID, tr, color="tab:blue", lw=0.6, alpha=0.6)
     axes[1].plot(X_GRID, cond.mean(0), color="tab:blue", lw=2, label="mean")
     axes[1].scatter(
@@ -184,7 +273,8 @@ def _plot(prior, cond):
         fontsize=11,
     )
     fig.tight_layout()
-    out = os.path.join(HERE, "blackbox_conditioning.png")
+    suffix = f"_{tag}" if tag else ""
+    out = os.path.join(HERE, f"blackbox_conditioning{suffix}.png")
     fig.savefig(out, dpi=150)
     print(f"\nsaved figure to {out}")
 

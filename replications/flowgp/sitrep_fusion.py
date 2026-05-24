@@ -18,15 +18,23 @@ in cases in the final weeks." The fused posterior should resolve the resurgence
 that the data alone leaves uncertain -- text supplying information surveillance
 data is too sparse/delayed to pin down, the realistic value-add of sitreps.
 
-(A programmatic verifier stands in for the LLM, since none is available offline;
-swap it for an LLM log-likelihood over the trajectory given the sitrep text.)
+With ``--llm`` the programmatic ``sitrep_score`` is replaced by an
+open-weights instruction-tuned LM (see ``llm_score.LLMVerifier``): each ODE
+step renders the candidate trajectories to text and asks the LM
+"Is this trajectory consistent with: <SITREP>? Yes/No"; the per-candidate
+weights are softmax(log P(Yes) - log P(No)). The closed-form GP posterior on
+``D`` is unchanged. Use ``--mock-llm`` to route the JAX verifier through the
+same callback path for a no-GPU smoke test.
 
 Run:
-    uv run python replications/flowgp/sitrep_fusion.py
+    uv run python replications/flowgp/sitrep_fusion.py            # programmatic
+    uv run python replications/flowgp/sitrep_fusion.py --mock-llm # mock callback
+    uv run python replications/flowgp/sitrep_fusion.py --llm      # real LLM (GPU)
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 
 import jax
@@ -34,13 +42,25 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
+import matplotlib  # noqa: E402
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 from flowgp import make_schedule, snr_uniform_grid  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 M = 80
 X = jnp.linspace(0.0, 1.0, M)
 KAPPA, TAU2, OBS_STD = 0.07, 2.0, 0.4
+
+# Natural-language sitrep version of `sitrep_score`.
+SITREP = (
+    "After an initial peak around week 3, cases declined, but surveillance "
+    "from the field reports a renewed and sustained increase in incidence "
+    "during the final weeks of the observation window. Daily case counts in "
+    "those final weeks are clearly elevated above baseline (well above 1.0)."
+)
 
 
 def kern(a, b):
@@ -107,7 +127,56 @@ def fuse(
     return f_hat @ L.T + m_pred
 
 
+def _run_llm_fuse(key, m_pred, K_pred, args):
+    """Drive the fuse() loop with a real LLM (or mock) as q(C|f0)."""
+    from llm_score import LLMVerifier, MockVerifier, flowgp_pyloop, make_score_fn
+
+    if args.mock_llm:
+        backend = MockVerifier(sitrep_score)
+        backend.x_grid = np.asarray(X)
+    else:
+        backend = LLMVerifier(
+            model_name=args.model,
+            mode=args.mode,
+            x_grid=np.asarray(X),
+            n_show=args.n_show,
+            max_batch=args.batch,
+            device=args.device,
+        )
+    score_fn = make_score_fn(backend, SITREP, temperature=args.temperature)
+    fused = flowgp_pyloop(
+        key,
+        m_pred,
+        K_pred,
+        score_fn,
+        n_samples=args.n_samples,
+        T=args.T,
+        S=args.S,
+        progress=True,
+    )
+    print(
+        f"  [LLM calls: {backend.calls} (~{backend.total_prompts} prompts total)]"
+    )
+    backend.close()
+    return fused
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--llm", action="store_true")
+    parser.add_argument("--mock-llm", action="store_true")
+    parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--mode", choices=("yesno", "seqlp"), default="yesno")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--n-show", type=int, default=12)
+    parser.add_argument("--batch", type=int, default=64)
+    parser.add_argument("--n-samples", type=int, default=32)
+    parser.add_argument("--T", type=int, default=200)
+    parser.add_argument("--S", type=int, default=64)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--tag", default="")
+    args = parser.parse_args()
+
     key = jax.random.PRNGKey(0)
     truth = true_curve(X)
 
@@ -122,12 +191,20 @@ def main():
     # D only
     L = jnp.linalg.cholesky(K_pred + 1e-6 * jnp.eye(M))
     d_only = m_pred + jax.random.normal(k2, (300, M)) @ L.T
+
     # D + sitrep
     key, k3 = jax.random.split(key)
-    fused = fuse(k3, m_pred, K_pred, sitrep_score)
+    if args.llm or args.mock_llm:
+        kind = "LLM" if args.llm else "mock-LLM"
+        print(f"\n[fuse + {kind} sitrep score]")
+        fused = _run_llm_fuse(k3, m_pred, K_pred, args)
+        fused_label = f"D + sitrep ({kind})"
+    else:
+        fused = fuse(k3, m_pred, K_pred, sitrep_score)
+        fused_label = "D + sitrep"
 
-    print(f"true late level: {float(late_level(truth)):.2f}")
-    for name, s in [("D only", d_only), ("D + sitrep", fused)]:
+    print(f"\ntrue late level: {float(late_level(truth)):.2f}")
+    for name, s in [("D only", d_only), (fused_label, fused)]:
         ll = late_level(s)
         late_rmse = float(
             jnp.sqrt(
@@ -135,18 +212,18 @@ def main():
             )
         )
         print(
-            f"  {name:12s}: P(resurgence: late level>0.8)={float(jnp.mean(ll > 0.8)):.2f}"
+            f"  {name:22s}: P(resurgence: late level>0.8)={float(jnp.mean(ll > 0.8)):.2f}"
             f"  mean late level={float(ll.mean()):.2f}  late-window RMSE={late_rmse:.2f}"
         )
 
-    _plot(truth, obs_idx, y, d_only, fused)
+    _plot(truth, obs_idx, y, d_only, fused, fused_title=fused_label, tag=args.tag)
 
 
-def _plot(truth, obs_idx, y, d_only, fused):
+def _plot(truth, obs_idx, y, d_only, fused, fused_title="D + sitrep", tag=""):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.3), sharey=True)
     for ax, title, s in [
         (axes[0], "Case data only  p(f|D)", d_only),
-        (axes[1], "Data + sitrep  p(f|D)q(C|f)", fused),
+        (axes[1], f"{fused_title}  p(f|D)q(C|f)", fused),
     ]:
         lo, hi = jnp.quantile(s, jnp.array([0.05, 0.95]), axis=0)
         ax.fill_between(X, lo, hi, color="tab:blue", alpha=0.2, label="posterior 5-95%")
@@ -164,7 +241,8 @@ def _plot(truth, obs_idx, y, d_only, fused):
         fontsize=10,
     )
     fig.tight_layout()
-    out = os.path.join(HERE, "sitrep_fusion.png")
+    suffix = f"_{tag}" if tag else ""
+    out = os.path.join(HERE, f"sitrep_fusion{suffix}.png")
     fig.savefig(out, dpi=150)
     print(f"\nsaved figure to {out}")
 
