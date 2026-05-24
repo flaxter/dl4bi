@@ -228,10 +228,13 @@ class LLMVerifier:
         torch = self.torch
         enc = self.tokenizer(prompts, return_tensors="pt", padding=True).to(self.device)
         with torch.no_grad():
-            out = self.model(**enc)
-        # left-padded -> last position carries the next-token logits for every row.
-        logits = out.logits[:, -1, :]
-        log_probs = torch.log_softmax(logits.float(), dim=-1)
+            out = self.model(**enc, use_cache=False)
+        # Slice to the last (next-token) position BEFORE the float upcast --
+        # materialising log_softmax over (B, L, V) is what blew memory on the
+        # 152k-vocab Qwen lm_head.
+        last_logits = out.logits[:, -1, :].float().contiguous()
+        del out
+        log_probs = torch.log_softmax(last_logits, dim=-1)
         lp_yes = log_probs[:, self._yes_id]
         lp_no = log_probs[:, self._no_id]
         return (lp_yes - lp_no).cpu().numpy().astype(np.float64)
@@ -275,12 +278,28 @@ class LLMVerifier:
         input_ids_t = torch.from_numpy(input_ids).to(self.device)
         attn_t = torch.from_numpy(attn).to(self.device)
         with torch.no_grad():
-            out = self.model(input_ids=input_ids_t, attention_mask=attn_t)
-        log_probs = torch.log_softmax(out.logits.float(), dim=-1)  # (B, L, V)
+            out = self.model(
+                input_ids=input_ids_t, attention_mask=attn_t, use_cache=False
+            )
+        logits = out.logits  # (B, L, V) in model dtype
+        del out
 
-        # tok_lp[i, j] = log p(input_ids[i, j+1] | tokens up to col j)
+        # Chunked over the sequence dim to bound peak memory: float upcast +
+        # logsumexp on (B, L, V) materialises the full tensor; we only need
+        # (gathered - logsumexp) which we accumulate chunk by chunk.
         shifted = input_ids_t[:, 1:]
-        tok_lp = log_probs[:, :-1, :].gather(-1, shifted.unsqueeze(-1)).squeeze(-1)
+        B, Lm1 = shifted.shape
+        chunk = 64
+        tok_lp = torch.empty(B, Lm1, dtype=torch.float32, device=self.device)
+        for s in range(0, Lm1, chunk):
+            e = min(s + chunk, Lm1)
+            lg = logits[:, s:e, :].float()
+            tg = shifted[:, s:e]
+            gathered = lg.gather(-1, tg.unsqueeze(-1)).squeeze(-1)
+            lse = torch.logsumexp(lg, dim=-1)
+            tok_lp[:, s:e] = gathered - lse
+            del lg, gathered, lse
+        del logits
 
         # For each row, sum tok_lp over the *last* cont_len columns of tok_lp,
         # which correspond exactly to the continuation tokens (left-padded).
