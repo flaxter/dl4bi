@@ -46,7 +46,66 @@ Nothing else fuses numbers with free text. Two motivating settings:
    - free-text **clinical notes** → `q(C_text|f0)` (LLM score, evaluate-only).
    The guidance terms simply **add**, so multiple non-Gaussian factors compose.
 
-## Next task (this is why you're here)
+## Status of the LLM swap (May 2026)
+The LLM verifier is **done**: `llm_score.py` (`LLMVerifier` + `MockVerifier`
++ `flowgp_pyloop` driver), with `--llm` / `--mock-llm` flags on
+`blackbox_conditioning.py`, `sitrep_fusion.py`, and the new `emr_fusion.py`.
+Default model is **Qwen 2.5-7B-Instruct** in yesno mode (`log P(Yes) - log P(No)`
+to "Is this trajectory consistent with: <C>? Yes / No"); seqlp mode is also
+implemented but base-rate dominated for repetitive numerical text — needs a
+ratio against an empty-description prefix to be useful.
+
+Results from real-LLM runs (Qwen 7B, RTX 5000 Ada / RTX 4090, 16-24 min/run):
+
+| Demo                              | Metric                           | Programmatic | D-only | LLM        |
+| :---                              | :---                             |         ---: |   ---: | ---:       |
+| blackbox `(N=16, T=120, S=24, t=4)`| peak loc (target 0.7)            |     0.65±0.08|      — | **0.53±0.21** |
+|                                   | peak val (target 2.0)            |     1.50±0.49|      — | **1.73±0.85** |
+|                                   | unimodal frac                    |          0.95|      — | 0.88       |
+| sitrep   `(N=16, T=100, S=24, t=8)`| late-window RMSE                 |          0.30|   1.14 | **0.85**   |
+|                                   | mean late level (truth 1.5)      |          1.50|  −0.01 | 0.39       |
+|                                   | P(resurgence: late > 0.8)        |          0.95|   0.22 | 0.38       |
+| emr      `(N=16, T=100, S=24, tc=1, tt=4)`| late-window RMSE        |          0.91|   1.81 | D+text **1.24** / D+codes+text 1.82 |
+|                                   | full-grid RMSE                   |          0.54|   0.89 | D+text **0.63** / D+codes+text 0.93 |
+
+### What was discovered along the way
+- **Circularity dominates broad descriptions.** First sitrep run used a SITREP
+  that mentioned BOTH the early peak (already pinned by `D`) and the late
+  resurgence; this DEGRADED the late posterior (RMSE 1.14 → 1.52, mean late
+  −0.01 → −0.37). Narrowing the description to *only* the late-window
+  incremental info turned the result around (RMSE 1.52 → 0.85). The same
+  pattern repeated in EMR (broad NOTE: D+text full RMSE 0.55 with
+  temp_text=6; narrow NOTE: 0.63 with temp_text=4 — still better than D-only
+  0.89, and more honest about the source of the signal).
+- **JAX preallocation blocks the LM.** JAX takes 75 % of the card by default;
+  `XLA_PYTHON_CLIENT_PREALLOCATE=false` and `MEM_FRACTION=0.2` are now set in
+  each `--llm`-capable script.
+- **lm_head logits OOM.** Pull the last-position slice BEFORE the float upcast
+  (yesno); chunk over the sequence dim (seqlp). With Qwen 7B and prompts ~350
+  tokens on bf16, batch up to 48 fits in 32 GB; KV cache, not weights, is the
+  spike.
+- **Three-factor EMR temp balance is open.** With raw `code_score` in
+  [−15, 0] and LLM text score spread ~7–10 logits, the D+codes+text combo
+  is still dominated by codes at `temp_codes=1, temp_text=4`; D+text alone
+  beats D+codes+text. Worth sweeping `temp_codes ∈ {3,5,8}` and/or
+  `temp_text ∈ {1.5,2}` next.
+
+## What still wants doing
+1. **Sweep the EMR temperatures** so D+codes+text actually beats D+text alone
+   (this is the killer-app punchline; mock smoke test achieves it at full
+   RMSE 0.46).
+2. **seqlp-ratio mode.** Sequence-log-prob currently rewards predictability of
+   repeated tokens (flat-zero trajectories score best regardless of
+   description). Subtracting the empty-prefix log-prob would isolate the
+   *conditional* information. Useful for the principled-density variant.
+3. **Diagnostic: per-step softmax entropy.** Print mean entropy of the
+   per-candidate softmax — too low ⇒ weight collapse, too high ⇒ ineffective
+   guidance. Currently you tune by eyeball.
+4. **Bigger LLM.** Qwen 7B is the sweet spot on a 32 GB card; a 14 B model
+   would likely sharpen the calibration but might not fit. Try Qwen 2.5-14 B
+   on clpc122's 4090 (24 GB) using 4-bit quant.
+
+## Original next-task brief (for context — superseded by the section above)
 Replace the **programmatic verifier** stand-in with a **real open-weights LLM
 likelihood** `q(C | f0)`. The guidance machinery is already done and reusable —
 you only swap the score function.
@@ -92,34 +151,42 @@ Investigation: `deeprv_monotonic.py`, `convex_emulator.py`, `pde_emulator.py`,
 `ot_interpolant_flowgp.py`, `direct_monotone_prior.py`,
 `truncated_gaussian_monotone.py`, `spde_whitening.py`, `fm_monotonic.py`,
 `npe_vs_flowgp.py`.
-**The niche (LLM goes here):** `blackbox_conditioning.py`, `simulator_conditioning.py`,
-`sitrep_fusion.py`.
+**The niche (LLM lives here):** `blackbox_conditioning.py`,
+`simulator_conditioning.py`, `sitrep_fusion.py`, `emr_fusion.py`.
+**LLM machinery:** `llm_score.py` (`LLMVerifier`, `MockVerifier`,
+`flowgp_pyloop`, `make_score_fn`).
 (PNGs are git-ignored; each script regenerates its figure on run.)
 
 ## Copy-pastable prompt for the new session
-> You're picking up a research branch in `flaxter/dl4bi`:
+> You're picking up `flaxter/dl4bi` on branch
 > `claude/paper-method-replication-sAOh1`. Run
-> `git fetch origin && git checkout claude/paper-method-replication-sAOh1`, then
-> read `replications/flowgp/HANDOFF.md` end-to-end and the docstrings of
-> `blackbox_conditioning.py` and `sitrep_fusion.py`.
+> `git fetch origin && git checkout claude/paper-method-replication-sAOh1`,
+> then read `replications/flowgp/HANDOFF.md` end-to-end and the docstring of
+> `replications/flowgp/llm_score.py`.
 >
-> Context: we replicated FlowGP (arXiv:2605.21041) and established its one
-> irreducible use — conditioning a GP on a nonlinear, non-generatable,
-> *evaluate-only* likelihood, i.e. an LLM scoring how well a function matches
-> text — via gradient-free guidance. A programmatic verifier currently stands in
-> for the LLM.
+> Context. FlowGP (arXiv:2605.21041) is replicated; its irreducible niche is
+> conditioning a GP on a nonlinear non-generatable evaluate-only `q(C|f0)`
+> via gradient-free guidance. The verifier is now a real open-weights LLM
+> (Qwen 2.5-7B-Instruct, yesno mode). Three demos call it: `blackbox_conditioning.py`
+> (single description), `sitrep_fusion.py` (closed-form D + sitrep), and
+> `emr_fusion.py` (three-factor product: labs D + ICD/billing codes + clinical
+> note). All work; full results table is in HANDOFF.md.
 >
-> Task: replace that stand-in with a real **open-weights LLM** likelihood
-> `q(C|f0)`. I can run a local instruct model. Implement a batched `score(f0)`
-> (input `(...,M)`, returns a log-score per candidate) that renders the
-> trajectory as text and returns the LLM's log-consistency with a text
-> description/sitrep `C` — start with a yes/no verifier logit, then try summed
-> token log-probs of the rendered values. Keep it gradient-free (forward calls
-> only); reuse the guidance loop in `blackbox_guided_sample`/`fuse` unchanged —
-> just swap the score fn and batch the LLM over the `S` candidates per ODE step.
-> Do `blackbox_conditioning.py` first (single description), then `sitrep_fusion.py`
-> (case data + sitrep). Watch for weight collapse (temper the score, raise `S`)
-> and the circularity caveat in the handoff. Then, if it works, sketch the EMR
-> version: one latent patient trajectory fused from lab values (Gaussian `D`),
-> ICD/billing codes, and free-text notes (each an evaluate-only `q(C|f0)`,
-> guidance terms add). Use `uv run python ...`; commit and push to the same branch.
+> Open work items (in priority order):
+> 1. **Sweep EMR temperatures.** The three-factor combo D+codes+text currently
+>    underperforms D+text alone with `temp_codes=1, temp_text=4` because
+>    codes dominate the additive log-score. Try `temp_codes ∈ {3,5,8}` and/or
+>    `temp_text ∈ {1.5,2}` until D+codes+text beats D+text on late-window RMSE.
+> 2. **Add a softmax-entropy diagnostic** to `flowgp_pyloop` (mean entropy of
+>    the per-candidate softmax per ODE step) so temperature sweeps don't need
+>    to be tuned by eyeball.
+> 3. **`seqlp_ratio` mode** in `LLMVerifier`: subtract the empty-prefix
+>    sequence log-prob so the principled-density score isn't dominated by
+>    intrinsic token predictability (flat-zero candidates currently win).
+> 4. **Bigger model.** Qwen 14B with 4-bit quant on clpc122 (24 GB 4090) is
+>    the next jump up from 7B.
+>
+> GPU hosts (per CLAUDE memory): clpc35 = RTX 5000 Ada 32 GB, clpc122 = 4090
+> 24 GB. JAX preallocation is disabled in the demos so torch has room. Use
+> `uv run python ...`. Reproduce any of the three Qwen 7B runs with the exact
+> flags in the HANDOFF results table. Commit and push to the same branch.
