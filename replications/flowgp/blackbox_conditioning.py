@@ -44,7 +44,12 @@ from __future__ import annotations
 import argparse
 import os
 
-import jax
+# JAX pre-allocates 75% of GPU memory by default; with --llm the torch LM
+# wants the rest of the card, and our pyloop only does small JAX ops.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.2")
+
+import jax  # noqa: E402
 
 jax.config.update("jax_enable_x64", True)
 
