@@ -67,12 +67,17 @@ M = N_DAYS * PER_DAY
 T_DAYS = jnp.linspace(0.0, N_DAYS, M)  # day index in [0, 14]
 KAPPA, TAU2, OBS_STD = 1.5, 1.5, 0.35  # smoothing in days
 
+# Narrowed to ONLY the late-window incremental qualitative info -- the early
+# fever and antibiotic course are already covered by the labs and codes, so a
+# note mentioning them as well double-counts (the LLM rewards candidates for
+# features other factors already enforce, per HANDOFF.md circularity caveat).
 NOTE = (
-    "Clinical note. Patient initially febrile early in the admission; "
-    "after antibiotics on day 6 the severity index improved through day 10. "
-    "On days 11 to 13 the patient experienced a clear and sustained worsening "
-    "with a return of low-grade fever; severity index rose well above 1.0 "
-    "again during that late period."
+    "Late-stay nursing note (this report covers ONLY days 11 to 13 of the "
+    "admission; earlier days are addressed elsewhere). During days 11, 12, "
+    "and 13 the patient had a clear and sustained CLINICAL WORSENING with a "
+    "return of low-grade fever. The severity index on those three days is "
+    "well above 1.0 (clearly elevated above the patient's baseline of about "
+    "0.3). The early shape of the admission is not part of this note."
 )
 
 
